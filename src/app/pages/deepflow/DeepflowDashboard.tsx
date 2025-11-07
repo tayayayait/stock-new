@@ -660,13 +660,228 @@ interface AggregateForecastKpiOptions {
   forecastCache: Record<string, ForecastResponse>;
   seriesMap: Record<string, ForecastSeriesPoint[]>;
   promoExclude: boolean;
+  aggregatedStats?: AggregatedSeriesStats;
 }
+
+type SeriesAggregationMode = 'sum' | 'average';
+
+const SERIES_AGGREGATION_RULES: Record<'history' | 'forecast', { actual: SeriesAggregationMode; forecast: SeriesAggregationMode }> = {
+  history: { actual: 'sum', forecast: 'sum' },
+  forecast: { actual: 'sum', forecast: 'sum' },
+};
+
+interface AggregatedSeriesAccumulator {
+  date: string;
+  isoDate?: string;
+  promo: boolean;
+  phase: 'history' | 'forecast';
+  historyActualSum: number;
+  historyActualCount: number;
+  historyForecastSum: number;
+  historyForecastCount: number;
+  forecastSum: number;
+  forecastCount: number;
+}
+
+interface AggregatedSeriesStats {
+  historyActualTotal: number;
+  historyActualCount: number;
+  historyActualAverage: number | null;
+  forecastTotal: number;
+  forecastCount: number;
+  forecastAverage: number | null;
+}
+
+interface BuildAggregatedSeriesOptions {
+  skus: Product[];
+  seriesMap: Record<string, ForecastSeriesPoint[]>;
+  promoExclude: boolean;
+}
+
+const buildAggregatedSeriesForSkus = ({
+  skus,
+  seriesMap,
+  promoExclude,
+}: BuildAggregatedSeriesOptions): { series: ForecastSeriesPoint[]; stats: AggregatedSeriesStats } => {
+  if (!Array.isArray(skus) || skus.length === 0) {
+    return {
+      series: [],
+      stats: {
+        historyActualTotal: 0,
+        historyActualCount: 0,
+        historyActualAverage: null,
+        forecastTotal: 0,
+        forecastCount: 0,
+        forecastAverage: null,
+      },
+    };
+  }
+
+  const accumulator = new Map<string, AggregatedSeriesAccumulator>();
+
+  const resolveSeries = (sku: string): ForecastSeriesPoint[] => {
+    const normalized = normalizeSku(sku);
+    return seriesMap[sku] ?? seriesMap[normalized] ?? [];
+  };
+
+  const includePoint = (point: ForecastSeriesPoint): boolean => !(promoExclude && point.promo);
+
+  skus.forEach((product) => {
+    const series = resolveSeries(product.sku);
+    series.forEach((point) => {
+      const key = point.isoDate ?? point.date;
+      if (!key) {
+        return;
+      }
+
+      const existing = accumulator.get(key);
+      const bucket: AggregatedSeriesAccumulator =
+        existing ?? {
+          date: point.date,
+          isoDate: point.isoDate,
+          promo: Boolean(point.promo),
+          phase: point.phase,
+          historyActualSum: 0,
+          historyActualCount: 0,
+          historyForecastSum: 0,
+          historyForecastCount: 0,
+          forecastSum: 0,
+          forecastCount: 0,
+        };
+
+      bucket.isoDate = bucket.isoDate ?? point.isoDate;
+      bucket.date = bucket.date ?? point.date;
+      bucket.promo = bucket.promo || Boolean(point.promo);
+      if (bucket.phase === 'forecast' && point.phase === 'history') {
+        bucket.phase = 'history';
+      } else if (point.phase === 'forecast') {
+        bucket.phase = 'forecast';
+      }
+
+      const shouldInclude = includePoint(point);
+      if (point.phase === 'history') {
+        if (shouldInclude && typeof point.actual === 'number' && Number.isFinite(point.actual)) {
+          bucket.historyActualSum += point.actual;
+          bucket.historyActualCount += 1;
+        }
+        if (shouldInclude && typeof point.fc === 'number' && Number.isFinite(point.fc)) {
+          bucket.historyForecastSum += point.fc;
+          bucket.historyForecastCount += 1;
+        }
+      } else if (point.phase === 'forecast') {
+        if (shouldInclude && typeof point.fc === 'number' && Number.isFinite(point.fc)) {
+          bucket.forecastSum += point.fc;
+          bucket.forecastCount += 1;
+        }
+      }
+
+      accumulator.set(key, bucket);
+    });
+  });
+
+  const computeAggregatedValue = (
+    phase: 'history' | 'forecast',
+    type: 'actual' | 'forecast',
+    sum: number,
+    count: number,
+  ): { value: number | null; raw: number } => {
+    if (!Number.isFinite(sum) || count <= 0) {
+      return { value: null, raw: 0 };
+    }
+    const rule = SERIES_AGGREGATION_RULES[phase][type];
+    const base = rule === 'average' ? sum / count : sum;
+    if (!Number.isFinite(base)) {
+      return { value: null, raw: 0 };
+    }
+    return { value: Math.round(base), raw: base };
+  };
+
+  const sorted = Array.from(accumulator.values()).sort((a, b) => {
+    const aDate = parseForecastDate(a.isoDate ?? a.date);
+    const bDate = parseForecastDate(b.isoDate ?? b.date);
+    if (!aDate && !bDate) {
+      return 0;
+    }
+    if (!aDate) {
+      return -1;
+    }
+    if (!bDate) {
+      return 1;
+    }
+    return aDate.getTime() - bDate.getTime();
+  });
+
+  let historyActualTotal = 0;
+  let historyActualCount = 0;
+  let forecastTotal = 0;
+  let forecastCount = 0;
+
+  const series = sorted.map((bucket) => {
+    let actual: number | null = null;
+    let forecastValue = 0;
+
+    if (bucket.phase === 'history') {
+      const historyActual = computeAggregatedValue('history', 'actual', bucket.historyActualSum, bucket.historyActualCount);
+      if (historyActual.value !== null) {
+        actual = historyActual.value;
+        historyActualTotal += historyActual.raw;
+        historyActualCount += 1;
+      }
+
+      const historyForecast = computeAggregatedValue(
+        'history',
+        'forecast',
+        bucket.historyForecastSum,
+        bucket.historyForecastCount,
+      );
+      if (historyForecast.value !== null) {
+        forecastValue = historyForecast.value;
+        forecastTotal += historyForecast.raw;
+        forecastCount += 1;
+      } else if (actual !== null) {
+        forecastValue = actual;
+        forecastTotal += actual;
+        forecastCount += 1;
+      }
+    } else {
+      const forecastAggregated = computeAggregatedValue('forecast', 'forecast', bucket.forecastSum, bucket.forecastCount);
+      if (forecastAggregated.value !== null) {
+        forecastValue = forecastAggregated.value;
+        forecastTotal += forecastAggregated.raw;
+        forecastCount += 1;
+      } else {
+        forecastValue = 0;
+      }
+    }
+
+    return {
+      date: bucket.date,
+      isoDate: bucket.isoDate,
+      actual,
+      fc: Math.max(Math.round(forecastValue), 0),
+      phase: bucket.phase,
+      promo: bucket.promo,
+    } satisfies ForecastSeriesPoint;
+  });
+
+  const stats: AggregatedSeriesStats = {
+    historyActualTotal: Math.round(historyActualTotal),
+    historyActualCount,
+    historyActualAverage: historyActualCount > 0 ? historyActualTotal / historyActualCount : null,
+    forecastTotal: Math.round(forecastTotal),
+    forecastCount,
+    forecastAverage: forecastCount > 0 ? forecastTotal / forecastCount : null,
+  };
+
+  return { series, stats };
+};
 
 const aggregateForecastKpis = ({
   skus,
   forecastCache,
   seriesMap,
   promoExclude,
+  aggregatedStats,
 }: AggregateForecastKpiOptions): AggregatedForecastKpis => {
   if (!Array.isArray(skus) || skus.length === 0) {
     return { totalOutbound: 0, averageDailyDemand: 0, totalStock: 0, coverageDays: null, skuCount: 0 };
@@ -713,11 +928,31 @@ const aggregateForecastKpis = ({
     counted += 1;
   });
 
-  const averageDailyDemand = counted > 0 ? totalDailyDemand / counted : 0;
+  const aggregatedOutboundOverride =
+    aggregatedStats && Number.isFinite(aggregatedStats.historyActualTotal)
+      ? Math.max(aggregatedStats.historyActualTotal, 0)
+      : null;
+
+  const aggregatedAverageOverride =
+    aggregatedStats && Number.isFinite(aggregatedStats.forecastAverage)
+      ? Math.max(aggregatedStats.forecastAverage ?? 0, 0)
+      : aggregatedStats && Number.isFinite(aggregatedStats.historyActualAverage)
+      ? Math.max(aggregatedStats.historyActualAverage ?? 0, 0)
+      : null;
+
+  const averageDailyDemand =
+    counted > 0
+      ? totalDailyDemand / counted
+      : aggregatedAverageOverride !== null
+      ? aggregatedAverageOverride
+      : 0;
   const coverageDays = totalDailyDemand > 0 ? totalAvailable / totalDailyDemand : null;
 
   return {
-    totalOutbound: Math.round(totalOutbound),
+    totalOutbound:
+      aggregatedOutboundOverride !== null
+        ? Math.round(aggregatedOutboundOverride)
+        : Math.round(totalOutbound),
     averageDailyDemand: Math.round(averageDailyDemand),
     totalStock: Math.round(totalStock),
     coverageDays: coverageDays !== null ? Math.round(coverageDays) : null,
@@ -3817,6 +4052,13 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
     return { seriesMap: map, forecastIndexMap: indexMap };
   }, [forecastCache, promoExclude, skus]);
 
+  const aggregatedSeriesResult = useMemo(
+    () => buildAggregatedSeriesForSkus({ skus: filteredSkus, seriesMap, promoExclude }),
+    [filteredSkus, promoExclude, seriesMap],
+  );
+  const aggregatedSeries = aggregatedSeriesResult.series;
+  const aggregatedSeriesStats = aggregatedSeriesResult.stats;
+
   const aggregatedKpis = useMemo(
     () =>
       aggregateForecastKpis({
@@ -3824,8 +4066,9 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
         forecastCache,
         seriesMap,
         promoExclude,
+        aggregatedStats: aggregatedSeriesStats,
       }),
-    [filteredSkus, forecastCache, promoExclude, seriesMap],
+    [filteredSkus, forecastCache, promoExclude, seriesMap, aggregatedSeriesStats],
   );
 
   const anchorSku = useMemo(() => {
@@ -3839,14 +4082,22 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
   const anchorForecastIndex = anchorSku
     ? forecastIndexMap[anchorSku] ?? anchorSeries.length
     : anchorSeries.length;
+  const aggregatedForecastIndex = useMemo(
+    () => aggregatedSeries.findIndex((point) => point.phase === 'forecast'),
+    [aggregatedSeries],
+  );
 
-  const forecastRange: ForecastRange | null =
-    anchorForecastIndex >= 0 && anchorForecastIndex < anchorSeries.length
-      ? {
-          start: anchorSeries[anchorForecastIndex].date,
-          end: anchorSeries[anchorSeries.length - 1].date,
-        }
-      : null;
+  const forecastRange: ForecastRange | null = useMemo(() => {
+    const targetSeries = mode === 'overall' ? aggregatedSeries : anchorSeries;
+    const targetIndex = mode === 'overall' ? aggregatedForecastIndex : anchorForecastIndex;
+    if (targetIndex >= 0 && targetIndex < targetSeries.length) {
+      return {
+        start: targetSeries[targetIndex].date,
+        end: targetSeries[targetSeries.length - 1].date,
+      } satisfies ForecastRange;
+    }
+    return null;
+  }, [aggregatedForecastIndex, aggregatedSeries, anchorForecastIndex, anchorSeries, mode]);
 
   const handleRowClick = useCallback((sku: string) => {
     setSelectedSku(sku);
@@ -3885,11 +4136,10 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
       sku ? seriesMap[sku] ?? [] : [];
 
     if (mode === 'overall') {
-      const targetSku = anchorSku ?? filteredSkus[0]?.sku ?? null;
-      if (!targetSku) {
+      const targetSeries = aggregatedSeries;
+      if (targetSeries.length === 0) {
         return { chartData: [], visibleSeries: [] };
       }
-      const targetSeries = selectSeries(targetSku);
       const filtered = filterSeriesByMonths(targetSeries, chartWindowMonths);
       const fallbackCount = Math.max(Math.min(chartWindowMonths, targetSeries.length), Math.min(6, targetSeries.length));
       const effective =
@@ -3913,7 +4163,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
         : targetSeries.slice(-Math.max(fallbackCount, Math.min(6, targetSeries.length)));
 
     return { chartData: toChartData(effective), visibleSeries: effective };
-  }, [anchorSku, chartWindowMonths, filteredSkus, mode, selectedSku, seriesMap]);
+  }, [aggregatedSeries, anchorSku, chartWindowMonths, filteredSkus, mode, selectedSku, seriesMap]);
 
   const adjustedForecastRange = useMemo(
     () => adjustForecastRange(forecastRange, chartData),
@@ -4002,7 +4252,8 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
       return;
     }
 
-    const timelinePayload = visibleSeries.map((point) => ({
+    const timelineSource = mode === 'overall' ? anchorSeries : visibleSeries;
+    const timelinePayload = timelineSource.map((point) => ({
       date: point.isoDate ?? point.date,
       phase: point.phase,
       actual: point.actual,
@@ -4071,6 +4322,8 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
     visibleSeries,
     forecastCache,
     insightsState,
+    mode,
+    anchorSeries,
   ]);
 
   const normalizedAnchorSku = anchorSku ? normalizeSku(anchorSku) : null;
