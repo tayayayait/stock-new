@@ -19,6 +19,31 @@ const readSeedPreference = () => process.env.SEED_SAMPLE_DATA === 'true';
 
 let autoSeed = readSeedPreference();
 
+const normalizeName = (value: string): string => value.trim().toLowerCase();
+
+const slugifyForCode = (value: string): string =>
+  value
+    .trim()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase()
+    .slice(0, 12);
+
+const generateWarehouseCode = (name: string): string => {
+  const base = slugifyForCode(name) || 'AUTO';
+  let attempt = 0;
+  while (attempt < 1000) {
+    const suffix = attempt === 0 ? '' : `-${attempt + 1}`;
+    const candidate = `WH-${base}${suffix}`;
+    if (!warehouseStore.has(candidate)) {
+      return candidate;
+    }
+    attempt += 1;
+  }
+  return `WH-${randomUUID().slice(0, 8).toUpperCase()}`;
+};
+
 const defaultWarehouses: WarehousePayload[] = [
   {
     code: 'WH-SEOUL',
@@ -75,6 +100,15 @@ export function findWarehouseByCode(code: string): WarehouseRecord | undefined {
   return warehouseStore.get(code);
 }
 
+export function findWarehouseByName(name: string): WarehouseRecord | undefined {
+  ensureWarehouseSeedData();
+  const normalized = normalizeName(name);
+  if (!normalized) {
+    return undefined;
+  }
+  return Array.from(warehouseStore.values()).find((record) => normalizeName(record.name) === normalized);
+}
+
 export function createWarehouse(payload: WarehousePayload): WarehouseRecord {
   ensureWarehouseSeedData();
   if (warehouseStore.has(payload.code)) {
@@ -84,6 +118,22 @@ export function createWarehouse(payload: WarehousePayload): WarehouseRecord {
   const record = toRecord(payload);
   warehouseStore.set(record.code, record);
   return record;
+}
+
+export function findOrCreateWarehouseByName(name: string): WarehouseRecord {
+  ensureWarehouseSeedData();
+  const trimmed = name.trim();
+  if (!trimmed) {
+    throw new Error('창고 이름이 비어 있습니다.');
+  }
+
+  const existing = findWarehouseByName(trimmed);
+  if (existing) {
+    return existing;
+  }
+
+  const code = generateWarehouseCode(trimmed);
+  return createWarehouse({ code, name: trimmed });
 }
 
 type WarehouseUpdate = {

@@ -42,7 +42,7 @@ import PartnerManagementPanel from './components/PartnerManagementPanel';
 import CategoryManagementPanel from './components/CategoryManagementPanel';
 import ProductCsvUploadDialog from './components/ProductCsvUploadDialog';
 import CategoryManageDialog from './components/CategoryManageDialog';
-import { type ForecastChartLine, type ForecastRange } from './components/ForecastChart';
+import { type ForecastRange } from './components/ForecastChart';
 import ForecastChartCard from './components/ForecastChartCard';
 import ForecastInsightsSection from './components/ForecastInsightsSection';
 import { type ActionPlanItem } from './components/ActionPlanCards';
@@ -137,12 +137,16 @@ const sanitizePolicyDraftList = (value: unknown): PolicyRow[] => {
 
       return {
         sku: normalizeSku(record.sku),
+        name:
+          typeof record.name === 'string' && record.name.trim().length > 0
+            ? record.name.trim()
+            : null,
         forecastDemand: normalizeNumber(record.forecastDemand ?? null),
         demandStdDev: normalizeNumber(record.demandStdDev ?? null),
         leadTimeDays: normalizeNumber(record.leadTimeDays ?? null),
         serviceLevelPercent: normalizePercent(record.serviceLevelPercent ?? null),
-        smoothingAlpha: clampAlphaValue(record.smoothingAlpha ?? null),
-        corrRho: clampCorrelationValue(record.corrRho ?? null),
+        smoothingAlpha: FALLBACK_SMOOTHING_ALPHA,
+        corrRho: FALLBACK_CORRELATION_RHO,
       } satisfies PolicyRow;
     })
     .filter((entry): entry is PolicyRow => entry !== null);
@@ -181,8 +185,9 @@ const writePolicyDraftBackup = (rows: PolicyRow[]) => {
 const normalizePolicyRow = (row: PolicyRow): PolicyRow => ({
   ...row,
   sku: normalizeSku(row.sku),
-  smoothingAlpha: clampAlphaValue(row.smoothingAlpha),
-  corrRho: clampCorrelationValue(row.corrRho),
+  name: row.name && row.name.trim().length > 0 ? row.name.trim() : null,
+  smoothingAlpha: FALLBACK_SMOOTHING_ALPHA,
+  corrRho: FALLBACK_CORRELATION_RHO,
 });
 
 interface KpiSummary {
@@ -219,33 +224,42 @@ const INITIAL_FORECAST: ForecastRow[] = [
 
 const SERVICE_LEVEL_PRESETS = [85, 90, 93, 95, 97.5, 99] as const;
 
+const FALLBACK_LEAD_TIME_DAYS = 14;
+const FALLBACK_SERVICE_LEVEL_PERCENT = 95;
+const FALLBACK_SMOOTHING_ALPHA = 0.4;
+const FALLBACK_CORRELATION_RHO = 0.25;
+const EWMA_ANALYSIS_DAYS = 90;
+
 const INITIAL_POLICIES: PolicyRow[] = [
   {
     sku: 'D1E2F3G',
+    name: '버터 크루아상',
     forecastDemand: 320,
     demandStdDev: 48,
     leadTimeDays: 10,
     serviceLevelPercent: 95,
-    smoothingAlpha: null,
-    corrRho: null,
+    smoothingAlpha: FALLBACK_SMOOTHING_ALPHA,
+    corrRho: FALLBACK_CORRELATION_RHO,
   },
   {
     sku: 'H4I5J6K',
+    name: '시그니처 머핀 믹스',
     forecastDemand: 275,
     demandStdDev: 62,
     leadTimeDays: 21,
     serviceLevelPercent: 97,
-    smoothingAlpha: null,
-    corrRho: null,
+    smoothingAlpha: FALLBACK_SMOOTHING_ALPHA,
+    corrRho: FALLBACK_CORRELATION_RHO,
   },
   {
     sku: 'L7M8N9O',
+    name: '스위트 브리오슈',
     forecastDemand: 190,
     demandStdDev: 28,
     leadTimeDays: 7,
     serviceLevelPercent: 93,
-    smoothingAlpha: null,
-    corrRho: null,
+    smoothingAlpha: FALLBACK_SMOOTHING_ALPHA,
+    corrRho: FALLBACK_CORRELATION_RHO,
   },
 ];
 
@@ -266,7 +280,6 @@ const MONTHS = [
 ];
 
 const FORECAST_START_IDX = 7;
-const LINE_COLORS = ['#6366f1', '#f97316', '#22c55e', '#ec4899', '#0ea5e9', '#a855f7'];
 const erf = (x: number): number => {
   const sign = x < 0 ? -1 : 1;
   const abs = Math.abs(x);
@@ -588,6 +601,22 @@ const adjustForecastRange = (
   return { start, end };
 };
 
+const parseIsoToUtcEpoch = (value: string | undefined | null): number | null => {
+  if (!value) {
+    return null;
+  }
+  if (/\d{4}-\d{2}-\d{2}T/.test(value)) {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const parsed = Date.parse(`${value}T00:00:00+09:00`);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
 const buildFallbackSeries = (row: Product, idx: number, promoExclude: boolean): ForecastSeriesPoint[] => {
   return MONTHS.map((month, monthIndex) => {
     const base = Math.max(50, Math.round(row.dailyAvg * 18 + (idx + 1) * 25));
@@ -616,12 +645,6 @@ const SAFETY_COVERAGE_DAYS = 12;
 
 const availableStock = (row: Product): number => Math.max(row.onHand - row.reserved, 0);
 
-const FALLBACK_LEAD_TIME_DAYS = 14;
-const FALLBACK_SERVICE_LEVEL_PERCENT = 95;
-const FALLBACK_SMOOTHING_ALPHA = 0.4;
-const FALLBACK_CORRELATION_RHO = 0.25;
-const EWMA_ANALYSIS_DAYS = 90;
-
 const pickPositiveNumber = (...candidates: Array<number | null | undefined>): number => {
   for (const candidate of candidates) {
     if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) {
@@ -629,20 +652,6 @@ const pickPositiveNumber = (...candidates: Array<number | null | undefined>): nu
     }
   }
   return 0;
-};
-
-const clampAlphaValue = (value: number | null | undefined): number | null => {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return null;
-  }
-  return Math.max(0, Math.min(Math.round(value * 1000) / 1000, 1));
-};
-
-const clampCorrelationValue = (value: number | null | undefined): number | null => {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return null;
-  }
-  return Math.max(0, Math.min(Math.round(value * 1000) / 1000, 0.5));
 };
 
 const formatIsoDateUtc = (date: Date): string => {
@@ -1436,10 +1445,13 @@ const createPolicyFromProduct = (product: Product, options: CreatePolicyOptions 
 
   return {
     sku: normalizeSku(product.sku),
+    name: product.name.trim() || null,
     forecastDemand,
     demandStdDev,
     leadTimeDays,
     serviceLevelPercent,
+    smoothingAlpha: FALLBACK_SMOOTHING_ALPHA,
+    corrRho: FALLBACK_CORRELATION_RHO,
   };
 };
 
@@ -1617,8 +1629,6 @@ interface PolicyEditDialogProps {
     demandStdDev: number | null;
     leadTimeDays: number | null;
     serviceLevelPercent: number | null;
-    smoothingAlpha: number | null;
-    corrRho: number | null;
   };
   onClose: () => void;
   onSubmit: (next: {
@@ -1626,8 +1636,6 @@ interface PolicyEditDialogProps {
     demandStdDev: number | null;
     leadTimeDays: number | null;
     serviceLevelPercent: number | null;
-    smoothingAlpha: number | null;
-    corrRho: number | null;
   }) => void;
   onRecommend?: (sku: string) => Promise<ForecastRecommendationResult>;
   onApplyEwma?: (sku: string, alpha: number | null) => Promise<{
@@ -1651,12 +1659,9 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
   const [std, setStd] = useState<string>(value.demandStdDev?.toString() ?? '');
   const [lead, setLead] = useState<string>(value.leadTimeDays?.toString() ?? '');
   const [service, setService] = useState<string>(value.serviceLevelPercent?.toString() ?? '');
-  const [alpha, setAlpha] = useState<string>(value.smoothingAlpha?.toString() ?? '');
-  const [rho, setRho] = useState<string>(value.corrRho?.toString() ?? '');
   const [recommendation, setRecommendation] = useState<ForecastRecommendationResult | null>(null);
   const [recommendationError, setRecommendationError] = useState<string | null>(null);
   const [recommendationLoading, setRecommendationLoading] = useState(false);
-  const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysisInfo, setAnalysisInfo] = useState<string | null>(null);
 
@@ -1668,22 +1673,17 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
     setStd(value.demandStdDev?.toString() ?? '');
     setLead(value.leadTimeDays?.toString() ?? '');
     setService(value.serviceLevelPercent?.toString() ?? '');
-    setAlpha(value.smoothingAlpha?.toString() ?? '');
-    setRho(value.corrRho?.toString() ?? '');
     setRecommendation(null);
     setRecommendationError(null);
     setRecommendationLoading(false);
     setAnalysisError(null);
     setAnalysisInfo(null);
-    setAnalysisLoading(false);
   }, [
     open,
     value.forecastDemand,
     value.demandStdDev,
     value.leadTimeDays,
     value.serviceLevelPercent,
-    value.smoothingAlpha,
-    value.corrRho,
   ]);
 
   const toNonNegativeInt = (text: string): number | null => {
@@ -1702,30 +1702,6 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
     return Math.max(50, Math.min(99.9, Math.round(n * 10) / 10));
   };
 
-  const toAlphaValue = (text: string): number | null => {
-    const t = (text ?? '').trim();
-    if (!t) {
-      return null;
-    }
-    const n = Number.parseFloat(t);
-    if (!Number.isFinite(n)) {
-      return null;
-    }
-    return clampAlphaValue(n);
-  };
-
-  const toCorrelationValue = (text: string): number | null => {
-    const t = (text ?? '').trim();
-    if (!t) {
-      return null;
-    }
-    const n = Number.parseFloat(t);
-    if (!Number.isFinite(n)) {
-      return null;
-    }
-    return clampCorrelationValue(n);
-  };
-
   const zValue = useMemo(() => {
     const p = toServicePercent(service);
     return Number.isFinite(p as number) ? serviceLevelPercentageToZ(p as number) : null;
@@ -1738,9 +1714,31 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
     setRecommendationError(null);
     setRecommendation(null);
     setRecommendationLoading(true);
+    setAnalysisError(null);
+    setAnalysisInfo(null);
     try {
       const result = await onRecommend(sku);
-      setRecommendation(result);
+      let merged = result;
+      if (onApplyEwma) {
+        try {
+          const ewma = await onApplyEwma(sku, FALLBACK_SMOOTHING_ALPHA);
+          merged = {
+            ...result,
+            forecastDemand: ewma.forecastDemand ?? result.forecastDemand,
+            demandStdDev: ewma.demandStdDev ?? result.demandStdDev,
+          };
+          setAnalysisInfo(
+            `최근 ${EWMA_ANALYSIS_DAYS.toLocaleString()}일 출고 데이터를 기준으로 EWMA(α=${FALLBACK_SMOOTHING_ALPHA}) 값을 적용했습니다.`,
+          );
+        } catch (error) {
+          const message =
+            error instanceof Error && error.message
+              ? error.message
+              : '기간 출고 데이터를 반영하지 못했습니다.';
+          setAnalysisError(message);
+        }
+      }
+      setRecommendation(merged);
     } catch (error) {
       const message =
         error instanceof Error && error.message ? error.message : '정책을 불러오지 못했습니다.';
@@ -1748,7 +1746,7 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
     } finally {
       setRecommendationLoading(false);
     }
-  }, [onRecommend, sku]);
+  }, [onApplyEwma, onRecommend, sku]);
 
   const handleApplyRecommendation = useCallback(() => {
     if (!recommendation) {
@@ -1768,37 +1766,6 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
       setService(formatted.toString());
     }
   }, [recommendation]);
-
-  const handleApplyEwma = useCallback(async () => {
-    if (!onApplyEwma) {
-      return;
-    }
-    setAnalysisError(null);
-    setAnalysisInfo(null);
-    setAnalysisLoading(true);
-    try {
-      const alphaValue = toAlphaValue(alpha);
-      const result = await onApplyEwma(sku, alphaValue);
-      if (result.forecastDemand !== null) {
-        setDemand(result.forecastDemand.toString());
-      }
-      if (result.demandStdDev !== null) {
-        setStd(result.demandStdDev.toString());
-      }
-      if (result.smoothingAlpha !== null) {
-        setAlpha(result.smoothingAlpha.toString());
-      } else if (alphaValue !== null) {
-        setAlpha(alphaValue.toString());
-      }
-      setAnalysisInfo(`최근 ${EWMA_ANALYSIS_DAYS.toLocaleString()}일 출고 데이터를 기준으로 EWMA 값을 적용했습니다.`);
-    } catch (error) {
-      const message =
-        error instanceof Error && error.message ? error.message : '기간 출고 데이터를 반영하지 못했습니다.';
-      setAnalysisError(message);
-    } finally {
-      setAnalysisLoading(false);
-    }
-  }, [alpha, onApplyEwma, sku]);
 
   if (!open) return null;
 
@@ -1820,8 +1787,6 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
               demandStdDev: toNonNegativeInt(std),
               leadTimeDays: toNonNegativeInt(lead),
               serviceLevelPercent: toServicePercent(service),
-              smoothingAlpha: toAlphaValue(alpha),
-              corrRho: toCorrelationValue(rho),
             });
           }}
           className="space-y-3"
@@ -1878,34 +1843,6 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
               <div className="text-xs text-slate-500">{zValue !== null ? `Z ? ${zValue.toFixed(2)}` : 'Z -'}</div>
             </div>
           </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label className="text-sm font-medium text-slate-700" htmlFor="policy-edit-alpha">
-                스무딩 계수 α (0~1)
-              </label>
-              <input
-                className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                inputMode="decimal"
-                id="policy-edit-alpha"
-                value={alpha}
-                onChange={(e) => setAlpha(e.target.value)}
-                placeholder={FALLBACK_SMOOTHING_ALPHA.toString()}
-              />
-            </div>
-            <div>
-              <label className="text-sm font-medium text-slate-700" htmlFor="policy-edit-rho">
-                상관계수 ρ (0~0.5)
-              </label>
-              <input
-                className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                inputMode="decimal"
-                id="policy-edit-rho"
-                value={rho}
-                onChange={(e) => setRho(e.target.value)}
-                placeholder={FALLBACK_CORRELATION_RHO.toString()}
-              />
-            </div>
-          </div>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <button
               type="button"
@@ -1914,14 +1851,6 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
               disabled={recommendationLoading || !onRecommend}
             >
               {recommendationLoading ? '산출 중...' : '추천값 자동산출'}
-            </button>
-            <button
-              type="button"
-              className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 shadow-sm transition hover:border-indigo-300 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={handleApplyEwma}
-              disabled={analysisLoading || !onApplyEwma}
-            >
-              {analysisLoading ? '반영 중...' : '기간출고 반영 (EWMA)'}
             </button>
             {recommendation && (
               <button
@@ -1948,7 +1877,7 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
 
           {recommendation && (
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-              <p>예상 일수요: {recommendation.forecastDemand ?? '-'} EA/일</p>
+              <p>예측 수요량: {recommendation.forecastDemand ?? '-'} EA/일</p>
               <p>수요 표준편차: {recommendation.demandStdDev ?? '-'} EA/일</p>
               <p>리드타임: {recommendation.leadTimeDays ?? '-'} 일</p>
               <p>서비스 수준: {recommendation.serviceLevelPercent ?? '-'}%</p>
@@ -2112,13 +2041,10 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
   );
 
   const handlePolicyEwma = useCallback(
-    async (targetSku: string, alphaHint: number | null) => {
+    async (targetSku: string, _alphaHint: number | null) => {
       const normalized = normalizeSku(targetSku);
       const policy = policyRows.find((row) => normalizeSku(row.sku) === normalized);
-
-      const alphaFromHint = clampAlphaValue(alphaHint);
-      const alphaFromPolicy = clampAlphaValue(policy?.smoothingAlpha ?? null);
-      const appliedAlpha = alphaFromHint ?? alphaFromPolicy ?? FALLBACK_SMOOTHING_ALPHA;
+      const appliedAlpha = FALLBACK_SMOOTHING_ALPHA;
 
       const today = new Date();
       const toDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
@@ -2348,7 +2274,10 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
               forecast: forecastCache[normalizedSku] ?? forecastCache[product.sku],
             });
 
-        const normalizedDraft: PolicyRow = { ...draft, sku: normalizeSku(draft.sku) };
+        const normalizedDraft: PolicyRow = normalizePolicyRow({
+          ...draft,
+          sku: normalizeSku(draft.sku),
+        });
         const next = [...prev, normalizedDraft];
         next.sort((a, b) => a.sku.localeCompare(b.sku));
         return next;
@@ -2383,7 +2312,12 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
       try {
         const refreshed = await fetchPolicies();
         const sorted = [...refreshed]
-          .map((row) => ({ ...row, sku: normalizeSku(row.sku) }))
+          .map((row) =>
+            normalizePolicyRow({
+              ...row,
+              sku: normalizeSku(row.sku),
+            }),
+          )
           .sort((a, b) => a.sku.localeCompare(b.sku));
 
         let resolvedRows: PolicyRow[] | null = null;
@@ -2402,7 +2336,15 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
             return sorted;
           }
 
-          const merged = [...sorted, ...manualRows.map((row) => ({ ...row, sku: normalizeSku(row.sku) }))];
+          const merged = [
+            ...sorted,
+            ...manualRows.map((row) =>
+              normalizePolicyRow({
+                ...row,
+                sku: normalizeSku(row.sku),
+              }),
+            ),
+          ];
           merged.sort((a, b) => a.sku.localeCompare(b.sku));
           resolvedRows = merged;
           return merged;
@@ -2635,8 +2577,6 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
               demandStdDev: row.demandStdDev ?? null,
               leadTimeDays: row.leadTimeDays ?? null,
               serviceLevelPercent: row.serviceLevelPercent ?? null,
-              smoothingAlpha: row.smoothingAlpha ?? null,
-              corrRho: row.corrRho ?? null,
             };
           })()}
           onClose={() => {
@@ -2654,8 +2594,8 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
                       demandStdDev: next.demandStdDev,
                       leadTimeDays: next.leadTimeDays,
                       serviceLevelPercent: next.serviceLevelPercent ?? row.serviceLevelPercent,
-                      smoothingAlpha: next.smoothingAlpha ?? null,
-                      corrRho: next.corrRho ?? null,
+                      smoothingAlpha: FALLBACK_SMOOTHING_ALPHA,
+                      corrRho: FALLBACK_CORRELATION_RHO,
                     }
                   : row,
               ),
@@ -2715,6 +2655,7 @@ const DeepflowDashboard: React.FC = () => {
   const [csvDialogOpen, setCsvDialogOpen] = useState(false);
   const [csvDownloadPending, setCsvDownloadPending] = useState(false);
   const [csvStatus, setCsvStatus] = useState<CsvStatusMessage | null>(null);
+  const autoDraftedSkuRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     return () => {
@@ -2736,16 +2677,20 @@ const DeepflowDashboard: React.FC = () => {
         return;
       }
 
-      const normalizedRemote = remotePolicies.map((row) => ({
-        ...row,
-        sku: normalizeSku(row.sku),
-      }));
+      const normalizedRemote = remotePolicies.map((row) =>
+        normalizePolicyRow({
+          ...row,
+          sku: normalizeSku(row.sku),
+        }),
+      );
       const sorted = [...normalizedRemote].sort((a, b) => a.sku.localeCompare(b.sku));
       const remoteSkuSet = new Set(sorted.map((row) => row.sku));
-      const backupRows = readPolicyDraftBackup().map((row) => ({
-        ...row,
-        sku: normalizeSku(row.sku),
-      }));
+      const backupRows = readPolicyDraftBackup().map((row) =>
+        normalizePolicyRow({
+          ...row,
+          sku: normalizeSku(row.sku),
+        }),
+      );
       const backupAdditional = backupRows.filter((row) => !remoteSkuSet.has(row.sku));
       const baseRows = sorted.length > 0 ? [...sorted, ...backupAdditional] : [...backupRows];
       if (baseRows.length > 1) {
@@ -2768,11 +2713,22 @@ const DeepflowDashboard: React.FC = () => {
 
         const merged = [
           ...baseRows,
-          ...manualRows.map((row) => ({ ...row, sku: normalizeSku(row.sku) })),
+          ...manualRows.map((row) =>
+            normalizePolicyRow({
+              ...row,
+              sku: normalizeSku(row.sku),
+            }),
+          ),
         ];
         const unique = new Map<string, PolicyRow>();
         merged.forEach((row) => {
-          unique.set(normalizeSku(row.sku), { ...row, sku: normalizeSku(row.sku) });
+          unique.set(
+            normalizeSku(row.sku),
+            normalizePolicyRow({
+              ...row,
+              sku: normalizeSku(row.sku),
+            }),
+          );
         });
         const next = Array.from(unique.values());
         next.sort((a, b) => a.sku.localeCompare(b.sku));
@@ -2788,10 +2744,12 @@ const DeepflowDashboard: React.FC = () => {
       const message =
         error instanceof Error && error.message ? error.message : '정책을 불러오지 못했습니다.';
       setPolicyLoadError(message);
-      const backupRows = readPolicyDraftBackup().map((row) => ({
-        ...row,
-        sku: normalizeSku(row.sku),
-      }));
+      const backupRows = readPolicyDraftBackup().map((row) =>
+        normalizePolicyRow({
+          ...row,
+          sku: normalizeSku(row.sku),
+        }),
+      );
       if (backupRows.length > 0) {
         setPolicyRows((prev) => (prev.length === 0 ? backupRows : prev.map(normalizePolicyRow)));
         setPersistedPolicySkus(backupRows.map((row) => row.sku));
@@ -2816,35 +2774,6 @@ const DeepflowDashboard: React.FC = () => {
     }
     writePolicyDraftBackup(policyRows);
   }, [policyReady, policyRows]);
-
-  useEffect(() => {
-    if (!policyReady || !catalogReady) {
-      return;
-    }
-    if (policyRows.length === 0) {
-      return;
-    }
-
-    const validSkuSet = new Set(allProducts.map((product) => normalizeSku(product.sku)));
-    const filtered = policyRows.filter((row) => validSkuSet.has(normalizeSku(row.sku)));
-
-    if (filtered.length === policyRows.length && validSkuSet.size > 0) {
-      return;
-    }
-
-    setPolicyRows(filtered);
-    setPersistedPolicySkus(filtered.map((row) => normalizeSku(row.sku)));
-
-    void (async () => {
-      try {
-        await savePolicies(filtered.map(normalizePolicyRow));
-        setPolicyLoadError(null);
-      } catch (error) {
-        console.error('[deepflow] policy sync failed during orphan cleanup', error);
-        setPolicyLoadError('품목에 없는 정책 데이터를 정리하지 못했습니다. 다시 시도해 주세요.');
-      }
-    })();
-  }, [allProducts, catalogReady, policyReady, policyRows, setPersistedPolicySkus, setPolicyLoadError, setPolicyRows]);
 
   const handleReloadPolicies = useCallback(() => {
     if (policyLoading) {
@@ -2958,9 +2887,11 @@ const DeepflowDashboard: React.FC = () => {
   }, []);
 
   const handleCsvCompleted = useCallback(() => {
+    // Reload products and policies so auto-created policy drafts from CSV appear immediately
     triggerProductsReload();
+    void loadPolicies();
     setCsvStatus({ kind: 'success', message: 'CSV 업로드 작업이 완료되어 목록을 갱신했습니다.' });
-  }, [triggerProductsReload]);
+  }, [triggerProductsReload, loadPolicies]);
 
   const forecastProductIds = useMemo(() => {
     const ids = new Set<number>();
@@ -3189,6 +3120,79 @@ const DeepflowDashboard: React.FC = () => {
     return map;
   }, [forecastState]);
 
+  useEffect(() => {
+    if (!policyReady || !catalogReady) {
+      return;
+    }
+
+    const validSkuSet = new Set(allProducts.map((product) => normalizeSku(product.sku)));
+
+    let nextRows = policyRows;
+    let mutated = false;
+
+    if (policyRows.length > 0) {
+      const filtered = policyRows.filter((row) => validSkuSet.has(normalizeSku(row.sku)));
+      if (filtered.length !== policyRows.length) {
+        nextRows = filtered;
+        mutated = true;
+      }
+    }
+
+    const existingSkuSet = new Set(nextRows.map((row) => normalizeSku(row.sku)));
+    const drafts: PolicyRow[] = [];
+
+    allProducts.forEach((product) => {
+      const normalizedSkuValue = normalizeSku(product.sku);
+      if (existingSkuSet.has(normalizedSkuValue) || autoDraftedSkuRef.current.has(normalizedSkuValue)) {
+        return;
+      }
+
+      const forecast = forecastCache[product.sku] ?? forecastCache[normalizedSkuValue];
+      const draft = normalizePolicyRow(
+        createPolicyFromProduct(product, {
+          forecast,
+        }),
+      );
+
+      drafts.push(draft);
+      autoDraftedSkuRef.current.add(normalizedSkuValue);
+    });
+
+    if (drafts.length > 0) {
+      nextRows = [...nextRows, ...drafts];
+      nextRows.sort((a, b) => a.sku.localeCompare(b.sku));
+      mutated = true;
+    }
+
+    if (!mutated) {
+      return;
+    }
+
+    const normalizedRows = nextRows.map((row) =>
+      normalizePolicyRow({
+        ...row,
+        sku: normalizeSku(row.sku),
+      }),
+    );
+
+    const distinctRows = Array.from(
+      new Map(normalizedRows.map((row) => [normalizeSku(row.sku), row])).values(),
+    ).sort((a, b) => a.sku.localeCompare(b.sku));
+
+    setPolicyRows(distinctRows);
+    setPersistedPolicySkus(distinctRows.map((row) => row.sku));
+
+    void (async () => {
+      try {
+        await savePolicies(distinctRows.map(normalizePolicyRow));
+        setPolicyLoadError(null);
+      } catch (error) {
+        console.error('[deepflow] policy auto-draft sync failed', error);
+        setPolicyLoadError('정책 자동 생성 결과를 저장하지 못했습니다. 다시 시도해 주세요.');
+      }
+    })();
+  }, [allProducts, catalogReady, forecastCache, policyReady, policyRows, setPersistedPolicySkus, setPolicyLoadError, setPolicyRows]);
+
   const forecastStatusBySku = useMemo<Record<string, ForecastStateEntry>>(() => {
     const map: Record<string, ForecastStateEntry> = {};
     skus.forEach((row) => {
@@ -3251,14 +3255,24 @@ const DeepflowDashboard: React.FC = () => {
         setPolicyRows((prev) => {
           const filtered = prev
             .filter((item) => normalizeSku(item.sku) !== normalizedSku)
-            .map((item) => ({ ...item, sku: normalizeSku(item.sku) }));
+            .map((item) =>
+              normalizePolicyRow({
+                ...item,
+                sku: normalizeSku(item.sku),
+              }),
+            );
           nextPolicyDrafts = filtered;
           return filtered;
         });
         if (nextPolicyDrafts.length === policyRows.length) {
           nextPolicyDrafts = policyRows
             .filter((item) => normalizeSku(item.sku) !== normalizedSku)
-            .map((item) => ({ ...item, sku: normalizeSku(item.sku) }));
+            .map((item) =>
+              normalizePolicyRow({
+                ...item,
+                sku: normalizeSku(item.sku),
+              }),
+            );
         }
         setSelected((prev) => (prev && prev.sku === row.sku ? null : prev));
         setForecastState((prev) => {
@@ -3355,17 +3369,20 @@ const DeepflowDashboard: React.FC = () => {
             forecast: forecastCache[saved.sku],
             serviceLevelPercent: next[index].serviceLevelPercent,
           });
-          next[index] = {
+          next[index] = normalizePolicyRow({
             ...next[index],
             sku: saved.sku,
+            name: saved.name?.trim() || draft.name || next[index].name || null,
             forecastDemand: draft.forecastDemand ?? next[index].forecastDemand,
             demandStdDev: draft.demandStdDev ?? next[index].demandStdDev,
             leadTimeDays: draft.leadTimeDays ?? next[index].leadTimeDays,
-          };
+          });
           return next;
         }
 
-        const draft = createPolicyFromProduct(saved, { forecast: forecastCache[saved.sku] });
+        const draft = normalizePolicyRow(
+          createPolicyFromProduct(saved, { forecast: forecastCache[saved.sku] }),
+        );
         const next = [...prev, draft];
         next.sort((a, b) => a.sku.localeCompare(b.sku));
         return next;
@@ -3716,28 +3733,34 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
     setSelectedSku(sku);
   }, []);
 
-  const {
-    chartData,
-    lines,
-    visibleSeries,
-  } = useMemo<{
-    chartData: Array<{ date: string; isoDate: string; actual: number | null; fc: number; phase: 'history' | 'forecast' }>;
-    lines: ForecastChartLine[];
+  const { chartData, visibleSeries } = useMemo<{
+    chartData: Array<{
+      date: string;
+      isoDate: string;
+      ts?: number;
+      actual: number | null;
+      fc: number;
+      forecast: number;
+      phase: 'history' | 'forecast';
+      isFinal: boolean;
+    }>;
     visibleSeries: ForecastSeriesPoint[];
   }>(() => {
-    const baseLines: ForecastChartLine[] = [
-      { key: 'actual', name: '실적' },
-      { key: 'fc', name: '예측' },
-    ];
-
     const toChartData = (series: ForecastSeriesPoint[]) =>
-      series.map((point) => ({
-        date: point.date,
-        isoDate: point.isoDate,
-        actual: point.actual,
-        fc: point.fc,
-        phase: point.phase,
-      }));
+      series.map((point) => {
+        const source = point.isoDate ?? point.date;
+        const epoch = parseIsoToUtcEpoch(source);
+        return {
+          date: point.date,
+          isoDate: point.isoDate,
+          ts: epoch ?? undefined,
+          actual: point.actual,
+          fc: point.fc,
+          forecast: point.fc,
+          phase: point.phase,
+          isFinal: point.phase !== 'forecast',
+        };
+      });
 
     const selectSeries = (sku: string | null | undefined): ForecastSeriesPoint[] =>
       sku ? seriesMap[sku] ?? [] : [];
@@ -3745,7 +3768,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
     if (mode === 'overall') {
       const targetSku = anchorSku ?? skus[0]?.sku ?? null;
       if (!targetSku) {
-        return { chartData: [], lines: baseLines, visibleSeries: [] };
+        return { chartData: [], visibleSeries: [] };
       }
       const targetSeries = selectSeries(targetSku);
       const filtered = filterSeriesByMonths(targetSeries, chartWindowMonths);
@@ -3754,12 +3777,12 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
         filtered.length > 0
           ? filtered
           : targetSeries.slice(-Math.max(fallbackCount, Math.min(6, targetSeries.length)));
-      return { chartData: toChartData(effective), lines: baseLines, visibleSeries: effective };
+      return { chartData: toChartData(effective), visibleSeries: effective };
     }
 
     const targetSku = selectedSku ?? anchorSku ?? skus[0]?.sku ?? null;
     if (!targetSku) {
-      return { chartData: [], lines: baseLines, visibleSeries: [] };
+      return { chartData: [], visibleSeries: [] };
     }
 
     const targetSeries = selectSeries(targetSku);
@@ -3770,7 +3793,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
         ? filtered
         : targetSeries.slice(-Math.max(fallbackCount, Math.min(6, targetSeries.length)));
 
-    return { chartData: toChartData(effective), lines: baseLines, visibleSeries: effective };
+    return { chartData: toChartData(effective), visibleSeries: effective };
   }, [anchorSku, chartWindowMonths, mode, selectedSku, seriesMap, skus]);
 
   const adjustedForecastRange = useMemo(
@@ -4007,21 +4030,21 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
             </label>
           </div>
         </div>
-        <div className="overflow-auto max-h-[260px] border rounded-xl">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-gray-500">
-                <th className="py-2 px-3">SKU</th>
-                <th className="py-2 px-3">품명</th>
-                <th className="py-2 px-3">카테고리</th>
-                <th className="py-2 px-3">하위카테고리</th>
-                <th className="py-2 px-3">단위</th>
-                <th className="py-2 px-3 text-right">표준재고(ROP)</th>
-                <th className="py-2 px-3 text-right">안전재고</th>
-                <th className="py-2 px-3 text-right">예측_1주후</th>
-                <th className="py-2 px-3 text-right">예측_2주후</th>
-                <th className="py-2 px-3 text-right">예측_4주후</th>
-                <th className="py-2 px-3 text-right">예측_8주후</th>
+        <div className="max-h-[260px] overflow-auto rounded-2xl border border-slate-200 bg-white">
+          <table className="min-w-full text-sm text-slate-700">
+            <thead className="sticky top-0 z-10 bg-white shadow-[0_1px_0_rgba(15,23,42,0.08)]">
+              <tr className="text-left text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                <th className="px-5 py-3">SKU</th>
+                <th className="px-4 py-3">품명</th>
+                <th className="px-4 py-3">카테고리</th>
+                <th className="px-4 py-3">하위카테고리</th>
+                <th className="px-4 py-3">단위</th>
+                <th className="px-4 py-3 text-right">표준재고(ROP)</th>
+                <th className="px-4 py-3 text-right">안전재고</th>
+                <th className="px-4 py-3 text-right">예측_1주후</th>
+                <th className="px-4 py-3 text-right">예측_2주후</th>
+                <th className="px-4 py-3 text-right">예측_4주후</th>
+                <th className="px-4 py-3 text-right">예측_8주후</th>
               </tr>
             </thead>
             <tbody>
@@ -4044,20 +4067,48 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
                   <tr
                     key={row.sku}
                     onClick={() => handleRowClick(row.sku)}
-                    className={`${isSelected ? 'bg-indigo-50' : 'hover:bg-gray-50'} cursor-pointer`}
+                    className={`group cursor-pointer transition ${
+                      isSelected
+                        ? 'bg-primary-50/60'
+                        : 'hover:bg-[#f9fafb]'
+                    }`}
                     aria-selected={isSelected}
                   >
-                    <td className="py-2 px-3 font-mono">{row.sku}</td>
-                    <td className="py-2 px-3">{row.name}</td>
-                    <td className="py-2 px-3">{row.category}</td>
-                    <td className="py-2 px-3">{row.subCategory}</td>
-                    <td className="py-2 px-3">{row.unit || 'EA'}</td>
-                    <td className="py-2 px-3 text-right">{formatForecastValue(displayStandard)}</td>
-                    <td className="py-2 px-3 text-right">{formatForecastValue(displaySafety)}</td>
-                    <td className="py-2 px-3 text-right">{formatForecastValue(weekly?.week1)}</td>
-                    <td className="py-2 px-3 text-right">{formatForecastValue(weekly?.week2)}</td>
-                    <td className="py-2 px-3 text-right">{formatForecastValue(weekly?.week4)}</td>
-                    <td className="py-2 px-3 text-right">{formatForecastValue(weekly?.week8)}</td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex min-w-[96px] items-center gap-2 rounded-lg border-l-4 px-3 py-1 font-mono text-sm font-semibold ${
+                          isSelected
+                            ? 'border-primary-600 bg-primary-100 text-primary-800'
+                            : 'border-primary-500 bg-primary-50 text-primary-700'
+                        }`}
+                      >
+                        {row.sku}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="max-w-[220px] truncate font-semibold text-slate-900">{row.name}</div>
+                    </td>
+                    <td className="px-4 py-3 text-slate-600">{row.category}</td>
+                    <td className="px-4 py-3 text-slate-600">{row.subCategory}</td>
+                    <td className="px-4 py-3 text-slate-600">{row.unit || 'EA'}</td>
+                    <td className="px-4 py-3 text-right font-semibold text-slate-900">
+                      {formatForecastValue(displayStandard)}
+                    </td>
+                    <td className="px-4 py-3 text-right font-semibold text-slate-900">
+                      {formatForecastValue(displaySafety)}
+                    </td>
+                    <td className="px-4 py-3 text-right text-slate-700">
+                      {formatForecastValue(weekly?.week1)}
+                    </td>
+                    <td className="px-4 py-3 text-right text-slate-700">
+                      {formatForecastValue(weekly?.week2)}
+                    </td>
+                    <td className="px-4 py-3 text-right text-slate-700">
+                      {formatForecastValue(weekly?.week4)}
+                    </td>
+                    <td className="px-4 py-3 text-right text-slate-700">
+                      {formatForecastValue(weekly?.week8)}
+                    </td>
                   </tr>
                 );
               })}
@@ -4069,12 +4120,11 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
       <ForecastChartCard
         sku={anchorSku}
         chartData={chartData}
-        lines={lines}
         forecastRange={adjustedForecastRange}
-        colors={LINE_COLORS}
         loading={chartLoading}
         error={anchorError}
         toolbar={chartToolbar}
+        unit={activeProduct?.unit ?? 'EA'}
       >
         <ForecastInsightsSection
           sku={anchorSku}

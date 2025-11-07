@@ -21,6 +21,40 @@ const readSeedPreference = () => process.env.SEED_SAMPLE_DATA === 'true';
 
 let autoSeed = readSeedPreference();
 
+const normalizeWarehouseCode = (value: string): string => value.trim().toLowerCase();
+const normalizeDescription = (value: string): string => value.trim().toLowerCase();
+
+const sanitizeForCode = (value: string): string =>
+  value
+    .trim()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase()
+    .slice(0, 12);
+
+const sanitizeWarehousePrefix = (warehouseCode: string): string =>
+  warehouseCode
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 8) || 'WH';
+
+const generateLocationCode = (warehouseCode: string, description: string): string => {
+  const prefix = sanitizeWarehousePrefix(warehouseCode);
+  const base = sanitizeForCode(description) || 'LOC';
+  let attempt = 0;
+  while (attempt < 1000) {
+    const suffix = attempt === 0 ? '' : `-${attempt + 1}`;
+    const candidate = `${prefix}-${base}${suffix}`;
+    if (!locationStore.has(candidate)) {
+      return candidate;
+    }
+    attempt += 1;
+  }
+  return `${prefix}-${randomUUID().slice(0, 6).toUpperCase()}`;
+};
+
 const defaultLocations: LocationPayload[] = [
   {
     code: 'SEOUL-A1',
@@ -85,6 +119,20 @@ export function findLocationByCode(code: string): LocationRecord | undefined {
   return locationStore.get(code);
 }
 
+export function findLocationByDescription(warehouseCode: string, description: string): LocationRecord | undefined {
+  ensureLocationSeedData();
+  const normalizedWarehouse = normalizeWarehouseCode(warehouseCode);
+  const normalizedDescriptionValue = normalizeDescription(description);
+  if (!normalizedWarehouse || !normalizedDescriptionValue) {
+    return undefined;
+  }
+  return Array.from(locationStore.values()).find(
+    (record) =>
+      normalizeWarehouseCode(record.warehouseCode) === normalizedWarehouse &&
+      normalizeDescription(record.description) === normalizedDescriptionValue,
+  );
+}
+
 export function createLocation(payload: LocationPayload): LocationRecord {
   ensureLocationSeedData();
   if (!findWarehouseByCode(payload.warehouseCode)) {
@@ -98,6 +146,31 @@ export function createLocation(payload: LocationPayload): LocationRecord {
   const record = toRecord(payload);
   locationStore.set(record.code, record);
   return record;
+}
+
+export function findOrCreateLocation(warehouseCode: string, description: string): LocationRecord {
+  ensureLocationSeedData();
+  const trimmedWarehouseCode = warehouseCode.trim();
+  const trimmedDescription = description.trim();
+  if (!trimmedWarehouseCode) {
+    throw new Error('창고 코드는 비어 있을 수 없습니다.');
+  }
+  if (!trimmedDescription) {
+    throw new Error('로케이션 설명은 비어 있을 수 없습니다.');
+  }
+
+  const existingByCode = findLocationByCode(trimmedDescription);
+  if (existingByCode && normalizeWarehouseCode(existingByCode.warehouseCode) === normalizeWarehouseCode(trimmedWarehouseCode)) {
+    return existingByCode;
+  }
+
+  const existing = findLocationByDescription(trimmedWarehouseCode, trimmedDescription);
+  if (existing) {
+    return existing;
+  }
+
+  const code = generateLocationCode(trimmedWarehouseCode, trimmedDescription);
+  return createLocation({ code, warehouseCode: trimmedWarehouseCode, description: trimmedDescription });
 }
 
 export function updateLocation(

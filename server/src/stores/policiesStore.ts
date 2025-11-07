@@ -5,6 +5,7 @@ const normalizeSku = (value: string): string => value.trim().toUpperCase();
 
 export interface PolicyDraftRecord {
   sku: string;
+  name: string | null;
   forecastDemand: number | null;
   demandStdDev: number | null;
   leadTimeDays: number | null;
@@ -52,6 +53,7 @@ const loadFromDisk = () => {
 
       policyStore.set(normalizeSku(record.sku), {
         sku: normalizeSku(record.sku),
+        name: typeof record.name === 'string' ? record.name.trim() || null : null,
         forecastDemand: typeof record.forecastDemand === 'number' ? record.forecastDemand : null,
         demandStdDev: typeof record.demandStdDev === 'number' ? record.demandStdDev : null,
         leadTimeDays: typeof record.leadTimeDays === 'number' ? record.leadTimeDays : null,
@@ -125,6 +127,35 @@ const clampCorrelation = (value: number | null): number | null => {
   return clamped;
 };
 
+const sanitizePolicyDraft = (draft: PolicyDraftRecord): PolicyDraftRecord | null => {
+  if (!draft?.sku) {
+    return null;
+  }
+
+  const normalizedSku = normalizeSku(draft.sku);
+  if (!normalizedSku) {
+    return null;
+  }
+
+  const normalizedName =
+    typeof draft.name === 'string'
+      ? draft.name.trim() || null
+      : draft.name === null
+        ? null
+        : null;
+
+  return {
+    sku: normalizedSku,
+    name: normalizedName,
+    forecastDemand: toNullableNumber(draft.forecastDemand),
+    demandStdDev: toNullableNumber(draft.demandStdDev),
+    leadTimeDays: toNullableNumber(draft.leadTimeDays),
+    serviceLevelPercent: clampServiceLevel(draft.serviceLevelPercent),
+    smoothingAlpha: clampAlpha(draft.smoothingAlpha ?? null),
+    corrRho: clampCorrelation(draft.corrRho ?? null),
+  };
+};
+
 export const listPolicyDrafts = (): PolicyDraftRecord[] =>
   Array.from(policyStore.values()).map((record) => ({ ...record }));
 
@@ -150,13 +181,16 @@ export const savePolicyDrafts = (drafts: PolicyDraftRecord[]): void => {
     }
 
     entries.set(normalizedSku, {
-      sku: normalizedSku,
-      forecastDemand: toNullableNumber(draft.forecastDemand),
-      demandStdDev: toNullableNumber(draft.demandStdDev),
-      leadTimeDays: toNullableNumber(draft.leadTimeDays),
-      serviceLevelPercent: clampServiceLevel(draft.serviceLevelPercent),
-      smoothingAlpha: clampAlpha(draft.smoothingAlpha ?? null),
-      corrRho: clampCorrelation(draft.corrRho ?? null),
+      ...(sanitizePolicyDraft({ ...draft, sku: normalizedSku }) ?? {
+        sku: normalizedSku,
+        name: null,
+        forecastDemand: null,
+        demandStdDev: null,
+        leadTimeDays: null,
+        serviceLevelPercent: null,
+        smoothingAlpha: null,
+        corrRho: null,
+      }),
     });
   });
 
@@ -165,6 +199,62 @@ export const savePolicyDrafts = (drafts: PolicyDraftRecord[]): void => {
     policyStore.set(record.sku, record);
   });
 
+  persistToDisk();
+};
+
+export const upsertPolicyDraft = (draft: PolicyDraftRecord): void => {
+  const sanitized = sanitizePolicyDraft(draft);
+  if (!sanitized) {
+    return;
+  }
+
+  policyStore.set(sanitized.sku, sanitized);
+  persistToDisk();
+};
+
+export const hasPolicyDraft = (sku: string): boolean => {
+  if (!sku) {
+    return false;
+  }
+  const normalized = normalizeSku(sku);
+  if (!normalized) {
+    return false;
+  }
+  return policyStore.has(normalized);
+};
+
+export const renamePolicyDraft = (
+  currentSku: string,
+  nextSku: string,
+  options?: { overwrite?: boolean },
+): void => {
+  if (!currentSku || !nextSku) {
+    return;
+  }
+
+  const currentNormalized = normalizeSku(currentSku);
+  const nextNormalized = normalizeSku(nextSku);
+  if (!currentNormalized || !nextNormalized || currentNormalized === nextNormalized) {
+    return;
+  }
+
+  const existing = policyStore.get(currentNormalized);
+  if (!existing) {
+    return;
+  }
+
+  const targetExists = policyStore.has(nextNormalized);
+  if (targetExists && !options?.overwrite) {
+    policyStore.delete(currentNormalized);
+    persistToDisk();
+    return;
+  }
+
+  const sanitized = sanitizePolicyDraft({ ...existing, sku: nextNormalized });
+  policyStore.delete(currentNormalized);
+  if (sanitized) {
+    policyStore.set(nextNormalized, sanitized);
+  }
   persistToDisk();
 };
 

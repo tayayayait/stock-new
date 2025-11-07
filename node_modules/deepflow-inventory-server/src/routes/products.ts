@@ -16,6 +16,15 @@ import {
   summarizeInventory,
   __resetInventoryStore,
 } from '../stores/inventoryStore.js';
+import {
+  deletePolicyDrafts,
+  getPolicyDraft,
+  hasPolicyDraft,
+  renamePolicyDraft,
+  upsertPolicyDraft,
+  type PolicyDraftRecord,
+} from '../stores/policiesStore.js';
+import { ensureProductCategory } from '../stores/categoriesStore.js';
 
 type InventoryRisk = '정상' | '결품위험' | '과잉';
 type AbcGrade = 'A' | 'B' | 'C';
@@ -124,6 +133,15 @@ let autoSeed = true;
 
 const DEFAULT_UNIT = 'EA';
 const DEFAULT_BUFFER_RATIO = 0.2;
+const DEFAULT_POLICY_SERVICE_LEVEL_PERCENT = 95;
+const DEFAULT_POLICY_SMOOTHING_ALPHA = 0.4;
+const DEFAULT_POLICY_CORRELATION_RHO = 0.25;
+const DEFAULT_POLICY_LEAD_TIME_DAYS = 14;
+
+const AUTO_SYNC_POLICIES_ENABLED = (() => {
+  const raw = String(process.env.AUTO_SYNC_POLICIES ?? 'true').trim().toLowerCase();
+  return raw !== 'false' && raw !== '0' && raw !== 'off';
+})();
 
 const allowedRisk: InventoryRisk[] = ['정상', '결품위험', '과잉'];
 const allowedAbc: AbcGrade[] = ['A', 'B', 'C'];
@@ -172,6 +190,97 @@ function formatPackCase(pack: number, casePack: number): string {
   const safeCase = Number.isFinite(casePack) && casePack > 0 ? Math.floor(casePack) : safePack;
   return `${safePack}/${safeCase}`;
 }
+
+const sanitizePolicyMetric = (value: number | null | undefined): number | null => {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
+  const rounded = Math.max(0, Math.round(numeric));
+  return Number.isFinite(rounded) ? rounded : null;
+};
+
+const pickPolicyMetric = (...values: Array<number | null | undefined>): number | null => {
+  for (const value of values) {
+    const sanitized = sanitizePolicyMetric(value);
+    if (sanitized !== null) {
+      return sanitized;
+    }
+  }
+  return null;
+};
+
+export const derivePolicyDraftFromProduct = (product: ProductRecord): PolicyDraftRecord => ({
+  sku: product.sku,
+  name: product.name.trim() || null,
+  forecastDemand: pickPolicyMetric(product.dailyAvg, product.avgOutbound7d),
+  demandStdDev: pickPolicyMetric(product.dailyStd),
+  leadTimeDays: sanitizePolicyMetric(DEFAULT_POLICY_LEAD_TIME_DAYS),
+  serviceLevelPercent: DEFAULT_POLICY_SERVICE_LEVEL_PERCENT,
+  smoothingAlpha: DEFAULT_POLICY_SMOOTHING_ALPHA,
+  corrRho: DEFAULT_POLICY_CORRELATION_RHO,
+});
+
+export const ensurePolicyDraftForProduct = (product: ProductRecord): void => {
+  if (!AUTO_SYNC_POLICIES_ENABLED) {
+    return;
+  }
+
+  const normalizedSku = product.sku?.trim();
+  if (!normalizedSku) {
+    return;
+  }
+
+  const existing = getPolicyDraft(normalizedSku);
+  if (!existing) {
+    upsertPolicyDraft(derivePolicyDraftFromProduct(product));
+    return;
+  }
+
+  const nextName = product.name.trim() || null;
+  const currentName = existing.name?.trim() || null;
+  if (nextName && nextName !== currentName) {
+    upsertPolicyDraft({ ...existing, name: nextName });
+  }
+};
+
+const syncPolicyDraftForSkuChange = (originalSku: string, product: ProductRecord): void => {
+  if (!AUTO_SYNC_POLICIES_ENABLED) {
+    return;
+  }
+
+  const normalizedOriginal = originalSku?.trim();
+  const normalizedNext = product.sku?.trim();
+  if (!normalizedNext) {
+    return;
+  }
+
+  if (!normalizedOriginal || normalizedOriginal === normalizedNext) {
+    ensurePolicyDraftForProduct(product);
+    return;
+  }
+
+  const existing = getPolicyDraft(normalizedOriginal);
+  if (!existing) {
+    ensurePolicyDraftForProduct(product);
+    return;
+  }
+
+  const targetExists = hasPolicyDraft(normalizedNext);
+  if (targetExists) {
+    deletePolicyDrafts([normalizedOriginal]);
+    ensurePolicyDraftForProduct(product);
+    return;
+  }
+
+  renamePolicyDraft(normalizedOriginal, normalizedNext);
+  ensurePolicyDraftForProduct(product);
+};
 
 export function validateProductPayload(input: unknown): ValidationResult {
   if (typeof input !== 'object' || input === null) {
@@ -503,6 +612,8 @@ export default async function productsRoutes(server: FastifyInstance) {
       return reply.code(409).send({ error: '이미 존재하는 SKU입니다.' });
     }
 
+    ensureProductCategory(value.category, value.subCategory);
+
     const now = new Date().toISOString();
     const { inventory: inventoryPayload, onHand: _onHand, reserved: _reserved, ...productValue } = value;
     const record: ProductRecord = {
@@ -522,6 +633,7 @@ export default async function productsRoutes(server: FastifyInstance) {
       reserved: entry.reserved,
     }));
     replaceInventoryForSku(record.sku, inventoryItems);
+    ensurePolicyDraftForProduct(record);
     return reply.code(201).send({ item: toResponse(record) });
   });
 
@@ -540,6 +652,8 @@ export default async function productsRoutes(server: FastifyInstance) {
     if (value.sku !== sku && productStore.has(value.sku)) {
       return reply.code(409).send({ error: '이미 존재하는 SKU입니다.' });
     }
+
+    ensureProductCategory(value.category, value.subCategory);
 
     const existing = productStore.get(sku)!;
     const { inventory: inventoryPayload, onHand: _onHand, reserved: _reserved, ...productValue } = value;
@@ -586,6 +700,7 @@ export default async function productsRoutes(server: FastifyInstance) {
       replaceInventoryForSku(targetSku, moved);
     }
 
+    syncPolicyDraftForSkuChange(sku, updated);
     return reply.send({ item: toResponse(updated) });
   });
 
@@ -597,6 +712,9 @@ export default async function productsRoutes(server: FastifyInstance) {
 
     productStore.delete(sku);
     deleteInventoryForSku(sku);
+    if (AUTO_SYNC_POLICIES_ENABLED) {
+      deletePolicyDrafts([sku]);
+    }
     return reply.code(204).send();
   });
 }
@@ -659,6 +777,7 @@ export function __upsertProduct(
   value: ValidatedProductPayload,
   options?: { originalSku?: string },
 ): { status: 'created' | 'updated'; record: ProductRecord } {
+  ensureProductCategory(value.category, value.subCategory);
   ensureSeedData();
 
   const originalSku = options?.originalSku ?? value.sku;
@@ -702,7 +821,7 @@ export function __upsertProduct(
       reserved: entry.reserved,
     }));
     replaceInventoryForSku(record.sku, inventoryItems);
-
+    ensurePolicyDraftForProduct(record);
     return { status: 'created', record };
   }
 
@@ -759,6 +878,7 @@ export function __upsertProduct(
     replaceInventoryForSku(targetSku, moved);
   }
 
+  syncPolicyDraftForSkuChange(originalSku, updated);
   return { status: 'updated', record: updated };
 }
 

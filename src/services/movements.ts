@@ -1,6 +1,8 @@
+import { MOVEMENT_TYPES, type MovementDraft, type MovementType } from '../../shared/movements/types';
+import { validateMovementDraft } from '../../shared/movements/validation';
 import { buildQueryString, get, post } from './api';
 
-export type MovementType = 'RECEIPT' | 'ISSUE' | 'ADJUST' | 'TRANSFER';
+export type { MovementType };
 
 export interface MovementLocationSummary {
   warehouseCode?: string;
@@ -52,8 +54,6 @@ export interface MovementListResult {
   limit: number;
   items: MovementSummary[];
 }
-
-const MOVEMENT_TYPES: readonly MovementType[] = ['RECEIPT', 'ISSUE', 'ADJUST', 'TRANSFER'] as const;
 
 const normalizeMovementType = (value?: string): MovementType => {
   if (value && MOVEMENT_TYPES.includes(value as MovementType)) {
@@ -150,27 +150,53 @@ export async function listMovements(params: ListMovementsParams): Promise<Moveme
   } satisfies MovementListResult;
 }
 
-export interface CreateMovementPayload {
-  type: MovementType;
-  sku: string;
+export type CreateMovementPayload = MovementDraft;
+
+export interface MovementBalanceSummary {
+  warehouse: string;
+  location?: string;
   qty: number;
-  userId: string;
-  occurredAt?: string;
-  partnerId?: string;
-  refNo?: string;
-  memo?: string;
-  fromWarehouse?: string;
-  fromLocation?: string;
-  toWarehouse?: string;
-  toLocation?: string;
+  updatedAt: string;
 }
 
-export interface CreateMovementResult {
-  movement?: {
-    id: string;
-  };
+export interface InventorySnapshot {
+  totalOnHand: number;
+  totalReserved: number;
+  totalAvailable: number;
 }
+
+export interface MovementExecutionResult {
+  movement: {
+    id: string;
+    type: MovementType;
+    sku: string;
+    qty: number;
+    occurredAt: string;
+    fromWarehouse?: string;
+    fromLocation?: string;
+    toWarehouse?: string;
+    toLocation?: string;
+    userId: string;
+    partnerId?: string;
+    refNo?: string;
+    memo?: string;
+  };
+  balances: MovementBalanceSummary[];
+  inventory: InventorySnapshot;
+}
+
+export interface MovementPendingResult {
+  success: true;
+  pendingId: string;
+  scheduledFor: string;
+}
+
+export type CreateMovementResult = MovementExecutionResult | MovementPendingResult;
 
 export async function submitMovement(payload: CreateMovementPayload): Promise<CreateMovementResult> {
-  return post<CreateMovementResult>('/api/movements', payload);
+  const validation = validateMovementDraft(payload, { requireOccurredAt: true });
+  if (!validation.success) {
+    throw new Error(validation.errors.join(' '));
+  }
+  return post<CreateMovementResult>('/api/movements', validation.data);
 }

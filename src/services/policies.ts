@@ -2,6 +2,9 @@ import { get, post } from './api';
 
 const POLICIES_REQUEST_TIMEOUT_MS = 15000;
 
+const FIXED_SMOOTHING_ALPHA = 0.4;
+const FIXED_CORRELATION_RHO = 0.25;
+
 export interface PolicyRecommendationPatch {
   z?: number;
   L?: number;
@@ -56,6 +59,7 @@ export interface PolicyRecommendationResponse {
 
 export interface PolicyDraft {
   sku: string;
+  name: string | null;
   forecastDemand: number | null;
   demandStdDev: number | null;
   leadTimeDays: number | null;
@@ -279,7 +283,7 @@ const normalizeNotes = (notes?: unknown): string[] => {
 export async function requestPolicyRecommendation(
   payload: PolicyRecommendationPayload,
 ): Promise<PolicyRecommendationResponse> {
-  const response = await post<PolicyRecommendationApiResponse>('/policies/recommend', payload);
+  const response = await post<PolicyRecommendationApiResponse>('/api/policies/recommend', payload);
 
   if (!response.success || !response.recommendation) {
     const message = response.error?.trim() || 'LLM 정책 추천을 생성하지 못했습니다.';
@@ -299,7 +303,7 @@ export async function requestPolicyRecommendation(
 export async function requestForecastRecommendation(
   payload: ForecastRecommendationPayload,
 ): Promise<ForecastRecommendationResult> {
-  const response = await post<ForecastRecommendationApiResponse>('/policies/recommend-forecast', payload);
+  const response = await post<ForecastRecommendationApiResponse>('/api/policies/recommend-forecast', payload);
 
   if (!response.success || !response.recommendation) {
     const message = response.error?.trim() || '추천값을 생성하지 못했습니다.';
@@ -310,7 +314,7 @@ export async function requestForecastRecommendation(
 }
 
 export async function fetchPolicies(): Promise<PolicyDraft[]> {
-  const response = await get<PolicyListResponse>('/policies', { timeoutMs: POLICIES_REQUEST_TIMEOUT_MS });
+  const response = await get<PolicyListResponse>('/api/policies', { timeoutMs: POLICIES_REQUEST_TIMEOUT_MS });
 
   if (!response.success) {
     const message = response.message?.trim() || '정책을 불러오지 못했습니다.';
@@ -321,18 +325,24 @@ export async function fetchPolicies(): Promise<PolicyDraft[]> {
 
   return items.map((item) => ({
     sku: item.sku,
+    name: typeof item.name === 'string' ? item.name.trim() || null : null,
     forecastDemand: item.forecastDemand ?? null,
     demandStdDev: item.demandStdDev ?? null,
     leadTimeDays: item.leadTimeDays ?? null,
     serviceLevelPercent: item.serviceLevelPercent ?? null,
-    smoothingAlpha: item.smoothingAlpha ?? null,
-    corrRho: item.corrRho ?? null,
+    smoothingAlpha: FIXED_SMOOTHING_ALPHA,
+    corrRho: FIXED_CORRELATION_RHO,
   }));
 }
 
 export async function savePolicies(policies: PolicyDraft[]): Promise<void> {
-  const response = await post<PolicyBulkSaveResponse>('/policies/bulk-save', {
-    items: policies ?? [],
+  const response = await post<PolicyBulkSaveResponse>('/api/policies/bulk-save', {
+    items: (policies ?? []).map((policy) => ({
+      ...policy,
+      name: policy.name ?? null,
+      smoothingAlpha: FIXED_SMOOTHING_ALPHA,
+      corrRho: FIXED_CORRELATION_RHO,
+    })),
   });
 
   if (!response.success) {

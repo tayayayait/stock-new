@@ -9,6 +9,19 @@ import {
   type ProductPayload,
   type ProductRecord,
 } from './products.js';
+import {
+  ensureWarehouseSeedData,
+  findWarehouseByCode,
+  findWarehouseByName,
+  listWarehouses,
+  findOrCreateWarehouseByName,
+} from '../stores/warehousesStore.js';
+import {
+  ensureLocationSeedData,
+  findLocationByCode,
+  listLocations,
+  findOrCreateLocation,
+} from '../stores/locationsStore.js';
 
 const CSV_TYPES = ['products', 'initial_stock', 'movements'] as const;
 type CsvUploadType = (typeof CSV_TYPES)[number];
@@ -85,8 +98,12 @@ type ProductResponse = ReturnType<typeof __getProductRecords>[number];
 
 const CSV_HEADER_CONFIG: Record<CsvUploadType, { required: string[]; optional: string[] }> = {
   products: {
-    required: ['sku', 'name', 'category', 'abcGrade', 'xyzGrade', 'dailyAvg', 'dailyStd'],
+    required: ['sku', 'name', 'category'],
     optional: [
+      'abcGrade',
+      'xyzGrade',
+      'dailyAvg',
+      'dailyStd',
       'subCategory',
       'brand',
       'unit',
@@ -97,6 +114,9 @@ const CSV_HEADER_CONFIG: Record<CsvUploadType, { required: string[]; optional: s
       'reserved',
       'risk',
       'expiryDays',
+      'supplyPrice',
+      'salePrice',
+      'warehouseLocation',
     ],
   },
   initial_stock: {
@@ -141,13 +161,25 @@ const PRODUCT_HEADER_SYNONYMS: Record<string, string[]> = {
     '표준편차',
   ],
   isActive: ['isactive', '활성화', '판매중', '사용여부'],
-  onHand: ['onhand', 'currentstock', '현재고', '재고', '재고수량'],
+  onHand: ['onhand', 'currentstock', '현재고', '재고', '재고수량', '총수량'],
   reserved: ['reserved', '할당', '예약', '예약재고'],
   risk: ['risk', 'riskindicator', '위험도', '리스크'],
   expiryDays: ['expirydays', 'shelflife', '유통기한', '유통일수'],
   pack: ['pack', '포장', 'packqty'],
   casePack: ['casepack', '케이스포장', 'case qty'],
   bufferDays: ['bufferdays', '안전기간'],
+  supplyPrice: ['supplyprice', 'purchaseprice', 'cost', 'unitcost', 'buyprice', '구매가', '매입가', '매입단가'],
+  salePrice: ['saleprice', 'listprice', 'retailprice', 'sellingprice', '판매가', '판매단가', '소비자가'],
+  warehouseLocation: [
+    'warehouselocation',
+    'warehouse_location',
+    'warehouse-location',
+    '창고명(상세위치)',
+    '창고명상세위치',
+    '창고상세',
+    '창고위치',
+    '창고명',
+  ],
 };
 
 const INITIAL_STOCK_HEADER_SYNONYMS: Record<string, string[]> = {
@@ -227,7 +259,21 @@ const DEFAULT_PRODUCT_TEMPLATE_SAMPLE: Record<string, string> = {
   reserved: '30',
   risk: '정상',
   expiryDays: '90',
+  supplyPrice: '1080',
+  salePrice: '1450',
+  warehouseLocation: '서울 풀필먼트 센터(상온 A1 랙 존)',
 };
+
+const PRODUCT_TEMPLATE_COLUMNS: Array<{ header: string; canonical: string }> = [
+  { header: '제품명', canonical: 'name' },
+  { header: 'SKU', canonical: 'sku' },
+  { header: '카테고리', canonical: 'category' },
+  { header: '하위카테고리', canonical: 'subCategory' },
+  { header: '구매가', canonical: 'supplyPrice' },
+  { header: '판매가', canonical: 'salePrice' },
+  { header: '창고명(상세위치)', canonical: 'warehouseLocation' },
+  { header: '총수량', canonical: 'onHand' },
+];
 
 const DEFAULT_INITIAL_STOCK_SAMPLE: Record<string, string> = {
   sku: 'SAMPLE-SKU-001',
@@ -510,7 +556,17 @@ function parseNumber(value: string | undefined): number | undefined {
   if (!trimmed) {
     return undefined;
   }
-  const parsed = Number(trimmed.replace(/,/g, ''));
+
+  const sanitized = trimmed
+    .replace(/원/gi, '')
+    .replace(/[₩$,]/g, '')
+    .replace(/\s+/g, '');
+
+  if (!sanitized) {
+    return undefined;
+  }
+
+  const parsed = Number(sanitized);
   return Number.isFinite(parsed) ? parsed : Number.NaN;
 }
 
@@ -528,49 +584,260 @@ function parseBoolean(value: string | undefined): boolean | undefined {
   return undefined;
 }
 
+const toComparable = (value: string): string => value.replace(/\s+/g, '').toLowerCase();
+
+interface WarehouseLocationResult {
+  success: true;
+  value: { warehouseCode: string; locationCode: string };
+}
+
+interface WarehouseLocationError {
+  success: false;
+  errors: string[];
+}
+
+type WarehouseLocationParseResult = WarehouseLocationResult | WarehouseLocationError;
+
+function splitWarehouseLocation(value: string): { warehouse: string; location: string } | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parenStart = trimmed.indexOf('(');
+  const parenEnd = trimmed.lastIndexOf(')');
+  if (parenStart !== -1 && parenEnd !== -1 && parenEnd > parenStart) {
+    const warehouse = trimmed.slice(0, parenStart).trim();
+    const location = trimmed.slice(parenStart + 1, parenEnd).trim();
+    if (warehouse && location) {
+      return { warehouse, location };
+    }
+  }
+
+  if (trimmed.includes('/')) {
+    const [warehouse, location] = trimmed.split('/').map((part) => part.trim());
+    if (warehouse && location) {
+      return { warehouse, location };
+    }
+  }
+
+  return null;
+}
+
+function parseWarehouseLocationField(raw: string | undefined): WarehouseLocationParseResult {
+  if (!raw || !raw.trim()) {
+    return { success: false, errors: ['창고명(상세위치) 필드는 비어 있을 수 없습니다.'] };
+  }
+
+  const parts = splitWarehouseLocation(raw);
+  if (!parts) {
+    return {
+      success: false,
+      errors: ['창고명(상세위치)는 "창고명(상세위치)" 또는 "창고코드/상세위치" 형식이어야 합니다.'],
+    };
+  }
+
+  ensureWarehouseSeedData();
+  ensureLocationSeedData();
+
+  const trimmedWarehouse = parts.warehouse.trim();
+  const trimmedLocation = parts.location.trim();
+
+  const warehouses = listWarehouses();
+  const warehouseComparable = toComparable(trimmedWarehouse);
+  let warehouseRecord =
+    warehouses.find((warehouse) => toComparable(warehouse.code) === warehouseComparable) ??
+    warehouses.find((warehouse) => toComparable(warehouse.name) === warehouseComparable) ??
+    findWarehouseByCode(trimmedWarehouse) ??
+    findWarehouseByName(trimmedWarehouse);
+
+  if (!warehouseRecord) {
+    try {
+      warehouseRecord = findOrCreateWarehouseByName(trimmedWarehouse);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : '창고 정보를 처리하는 중 예상치 못한 오류가 발생했습니다.';
+      return { success: false, errors: [message] };
+    }
+  }
+
+  const locationComparable = toComparable(trimmedLocation);
+  const normalizedWarehouseCode = warehouseRecord.code;
+
+  const locationByCode = findLocationByCode(trimmedLocation);
+  if (locationByCode) {
+    if (toComparable(locationByCode.warehouseCode) !== toComparable(normalizedWarehouseCode)) {
+      return {
+        success: false,
+        errors: [`${trimmedLocation} 위치는 ${normalizedWarehouseCode} 창고에 속해 있지 않습니다.`],
+      };
+    }
+    return {
+      success: true,
+      value: { warehouseCode: normalizedWarehouseCode, locationCode: locationByCode.code },
+    };
+  }
+
+  const locations = listLocations();
+  let locationRecord = locations.find(
+    (location) =>
+      toComparable(location.warehouseCode) === toComparable(normalizedWarehouseCode) &&
+      toComparable(location.description) === locationComparable,
+  );
+
+  if (!locationRecord) {
+    try {
+      locationRecord = findOrCreateLocation(normalizedWarehouseCode, trimmedLocation);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : '상세 위치를 처리하는 중 예상치 못한 오류가 발생했습니다.';
+      return { success: false, errors: [message] };
+    }
+  }
+
+  if (toComparable(locationRecord.warehouseCode) !== toComparable(normalizedWarehouseCode)) {
+    return {
+      success: false,
+      errors: [`${trimmedLocation} 위치는 ${normalizedWarehouseCode} 창고에 속해 있지 않습니다.`],
+    };
+  }
+
+  return {
+    success: true,
+    value: { warehouseCode: normalizedWarehouseCode, locationCode: locationRecord.code },
+  };
+}
+
+const hasValue = (value?: string): boolean => typeof value === 'string' && value.trim().length > 0;
+
+function parseOptionalNonNegativeNumber(
+  raw: string | undefined,
+  label: string,
+  errors: string[],
+): number | undefined {
+  if (!hasValue(raw)) {
+    return undefined;
+  }
+
+  const parsed = parseNumber(raw);
+  if (parsed === undefined || Number.isNaN(parsed)) {
+    errors.push(`${label} 필드는 숫자여야 합니다.`);
+    return undefined;
+  }
+
+  if (parsed < 0) {
+    errors.push(`${label} 필드는 0 이상이어야 합니다.`);
+    return undefined;
+  }
+
+  return parsed;
+}
+
+function parseRequiredNonNegativeInteger(
+  raw: string | undefined,
+  label: string,
+  errors: string[],
+): number | undefined {
+  if (!hasValue(raw)) {
+    errors.push(`${label} 필드는 필수입니다.`);
+    return undefined;
+  }
+
+  const parsed = parseNumber(raw);
+  if (parsed === undefined || Number.isNaN(parsed)) {
+    errors.push(`${label} 필드는 숫자여야 합니다.`);
+    return undefined;
+  }
+
+  if (!Number.isInteger(parsed)) {
+    errors.push(`${label} 필드는 정수로 입력해 주세요.`);
+  }
+
+  if (parsed < 0) {
+    errors.push(`${label} 필드는 0 이상이어야 합니다.`);
+  }
+
+  return parsed;
+}
+
 function getCsvHeaders(type: CsvUploadType): string[] {
   const config = CSV_HEADER_CONFIG[type];
   return [...config.required, ...config.optional];
 }
 
 function parseProductRow(raw: Record<string, string>, lineNumber: number): ParsedRow {
+  const errors: string[] = [];
+
+  const supplyPriceValue = parseOptionalNonNegativeNumber(raw.supplyPrice, '구매가', errors);
+  const salePriceValue = parseOptionalNonNegativeNumber(raw.salePrice, '판매가', errors);
+  const onHandValue = parseRequiredNonNegativeInteger(raw.onHand, '총수량', errors);
+
+  const locationResult = parseWarehouseLocationField(raw.warehouseLocation);
+  if (!locationResult.success) {
+    errors.push(...locationResult.errors);
+  }
+
+  const dailyAvgValue = parseOptionalNonNegativeNumber(raw.dailyAvg, '일평균수요', errors) ?? 0;
+  const dailyStdValue = parseOptionalNonNegativeNumber(raw.dailyStd, '수요표준편차', errors) ?? 0;
+  const reservedValue = parseOptionalNonNegativeNumber(raw.reserved, '예약 재고', errors) ?? 0;
+  const expiryDaysValue = parseOptionalNonNegativeNumber(raw.expiryDays, '유통일수', errors);
+
+  let bufferRatioValue: number | undefined;
+  if (hasValue(raw.bufferRatio)) {
+    const parsed = parseNumber(raw.bufferRatio);
+    if (parsed === undefined || Number.isNaN(parsed)) {
+      errors.push('버퍼율 필드는 숫자여야 합니다.');
+    } else if (parsed < 0 || parsed > 1) {
+      errors.push('버퍼율 필드는 0 이상 1 이하이어야 합니다.');
+    } else {
+      bufferRatioValue = parsed;
+    }
+  }
+
+  if (errors.length > 0) {
+    return {
+      index: lineNumber - 1,
+      lineNumber,
+      action: 'error',
+      raw,
+      messages: errors,
+    };
+  }
+
+  const normalizedOnHand = Math.max(0, Math.round(onHandValue ?? 0));
+  const inventoryEntry = locationResult.success
+    ? {
+        warehouseCode: locationResult.value.warehouseCode,
+        locationCode: locationResult.value.locationCode,
+        onHand: normalizedOnHand,
+        reserved: 0,
+      }
+    : undefined;
+
   const candidate: Record<string, unknown> = {
     sku: normalizeKey(raw.sku),
     name: normalizeKey(raw.name),
     category: normalizeKey(raw.category),
     subCategory: normalizeKey(raw.subCategory),
     brand: normalizeKey(raw.brand),
-    unit: normalizeKey(raw.unit),
-    packCase: normalizeKey(raw.packCase),
-    abcGrade: normalizeKey(raw.abcGrade),
-    xyzGrade: normalizeKey(raw.xyzGrade),
-    bufferRatio: parseNumber(raw.bufferRatio),
-    dailyAvg: parseNumber(raw.dailyAvg),
-    dailyStd: parseNumber(raw.dailyStd),
+    unit: normalizeKey(raw.unit) || 'EA',
+    packCase: normalizeKey(raw.packCase) || '1/1',
+    abcGrade: normalizeKey(raw.abcGrade) || 'B',
+    xyzGrade: normalizeKey(raw.xyzGrade) || 'Y',
+    bufferRatio: bufferRatioValue,
+    dailyAvg: dailyAvgValue,
+    dailyStd: dailyStdValue,
     isActive: parseBoolean(raw.isActive),
-    onHand: parseNumber(raw.onHand),
-    reserved: parseNumber(raw.reserved),
-    risk: normalizeKey(raw.risk),
-    expiryDays: parseNumber(raw.expiryDays),
+    onHand: normalizedOnHand,
+    reserved: reservedValue,
+    risk: normalizeKey(raw.risk) || '정상',
+    expiryDays: expiryDaysValue,
+    supplyPrice: supplyPriceValue,
+    salePrice: salePriceValue,
   };
 
-  if (Number.isNaN(candidate.bufferRatio as number)) {
-    candidate.bufferRatio = undefined;
-  }
-  if (Number.isNaN(candidate.dailyAvg as number)) {
-    candidate.dailyAvg = Number.NaN;
-  }
-  if (Number.isNaN(candidate.dailyStd as number)) {
-    candidate.dailyStd = Number.NaN;
-  }
-  if (Number.isNaN(candidate.onHand as number)) {
-    candidate.onHand = Number.NaN;
-  }
-  if (Number.isNaN(candidate.reserved as number)) {
-    candidate.reserved = Number.NaN;
-  }
-  if (Number.isNaN(candidate.expiryDays as number)) {
-    candidate.expiryDays = Number.NaN;
+  if (inventoryEntry) {
+    candidate.inventory = [inventoryEntry];
   }
 
   const validation = validateProductPayload(candidate);
@@ -910,18 +1177,30 @@ function formatProductTemplateValue(record: ProductResponse, column: string): st
       const { expiryDays } = record;
       return expiryDays === null || expiryDays === undefined ? '' : expiryDays.toString();
     }
+    case 'supplyPrice':
+      return record.supplyPrice === null || record.supplyPrice === undefined ? '' : record.supplyPrice.toString();
+    case 'salePrice':
+      return record.salePrice === null || record.salePrice === undefined ? '' : record.salePrice.toString();
+    case 'warehouseLocation': {
+      const firstInventory = record.inventory?.[0];
+      if (firstInventory) {
+        return `${firstInventory.warehouseCode}(${firstInventory.locationCode})`;
+      }
+      return DEFAULT_PRODUCT_TEMPLATE_SAMPLE.warehouseLocation ?? '';
+    }
     default:
       return '';
   }
 }
 
 function buildProductTemplate(): CsvTemplateConfig {
-  const headers = getCsvHeaders('products');
+  const headers = PRODUCT_TEMPLATE_COLUMNS.map((column) => column.header);
+  const canonicalColumns = PRODUCT_TEMPLATE_COLUMNS.map((column) => column.canonical);
   const products = __getProductRecords().slice(0, TEMPLATE_ROW_LIMIT);
   const rows: string[][] =
     products.length > 0
-      ? products.map((record) => headers.map((column) => formatProductTemplateValue(record, column)))
-      : [headers.map((column) => DEFAULT_PRODUCT_TEMPLATE_SAMPLE[column] ?? '')];
+      ? products.map((record) => canonicalColumns.map((column) => formatProductTemplateValue(record, column)))
+      : [canonicalColumns.map((column) => DEFAULT_PRODUCT_TEMPLATE_SAMPLE[column] ?? '')];
 
   rows.push(headers.map(() => ''));
   return { headers, rows };

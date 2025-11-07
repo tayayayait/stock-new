@@ -1,6 +1,22 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { type Product } from '../../../../domains/products';
-import { listMovements, type MovementSummary, type MovementType } from '../../../../services/movements';
+import {
+  listMovements,
+  type MovementSummary,
+  type MovementType,
+  type MovementLocationSummary,
+} from '../../../../services/movements';
+import {
+  fetchLocations,
+  fetchWarehouses,
+  fetchStockLevels,
+  type ApiLocation,
+  type ApiWarehouse,
+  type StockLevelListResponse,
+} from '../../../../services/api';
+import { listPartners } from '../../../../services/orders';
+import { formatWarehouseLocationLabel } from '../../../../utils/warehouse';
+import { getLocationLabel } from '../../../../app/utils/locationLabelRegistry';
 
 interface ProductDetailPanelProps {
   product: Product | null;
@@ -35,6 +51,15 @@ const ProductDetailPanel: React.FC<ProductDetailPanelProps> = ({ product }) => {
   const [movementState, setMovementState] = useState<MovementState>({ status: 'idle', items: [] });
   const [movementRequestId, setMovementRequestId] = useState(0);
   const lastSkuRef = useRef<string>();
+  const [warehouseCatalog, setWarehouseCatalog] = useState<Record<string, ApiWarehouse>>({});
+  const [locationCatalog, setLocationCatalog] = useState<Record<string, ApiLocation>>({});
+  const locationFetchStateRef = useRef<Record<string, 'idle' | 'loading' | 'loaded'>>({});
+  const partnerLoadedRef = useRef(false);
+  const warehouseFetchInProgressRef = useRef(false);
+  const [partnerCatalog, setPartnerCatalog] = useState<Record<string, string>>({});
+  const partnerRefreshInFlightRef = useRef(false);
+  const [stockLevels, setStockLevels] = useState<StockLevelListResponse['items'] | null>(null);
+  const stockLevelsRequestIdRef = useRef(0);
 
   useEffect(() => {
     const sku = product?.sku?.trim();
@@ -86,19 +111,346 @@ const ProductDetailPanel: React.FC<ProductDetailPanelProps> = ({ product }) => {
     };
   }, [product?.sku, movementRequestId]);
 
+  useEffect(() => {
+    if (partnerLoadedRef.current) {
+      return;
+    }
+
+    partnerLoadedRef.current = true;
+    let cancelled = false;
+
+    listPartners({ includeSample: true })
+      .then((partners) => {
+        if (cancelled || !Array.isArray(partners)) {
+          return;
+        }
+
+        setPartnerCatalog((prev) => {
+          const next: Record<string, string> = { ...prev };
+          partners.forEach((partner) => {
+            if (partner?.id) {
+              next[partner.id] = partner.name?.trim() || partner.id;
+            }
+          });
+          return next;
+        });
+      })
+      .catch((error) => {
+        console.error('[deepflow] Failed to load partner names', error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (partnerRefreshInFlightRef.current) {
+      return;
+    }
+    const unknownPartners = movementState.items.reduce<Set<string>>((set, movement) => {
+      const partnerId = movement.partnerId?.trim();
+      if (partnerId && !partnerCatalog[partnerId]) {
+        set.add(partnerId);
+      }
+      return set;
+    }, new Set<string>());
+    if (unknownPartners.size === 0) {
+      return;
+    }
+    partnerRefreshInFlightRef.current = true;
+    listPartners({ includeSample: true })
+      .then((partners) => {
+        setPartnerCatalog((prev) => {
+          const next = { ...prev };
+          partners.forEach((partner) => {
+            if (partner?.id) {
+              next[partner.id] = partner.name?.trim() || partner.id;
+            }
+          });
+          return next;
+        });
+      })
+      .catch((error) => {
+        console.error('[deepflow] Failed to refresh partner names', error);
+      })
+      .finally(() => {
+        partnerRefreshInFlightRef.current = false;
+      });
+  }, [movementState.items, partnerCatalog]);
+
+  useEffect(() => {
+    const relevantWarehouses = new Set<string>();
+    const locationRequests = new Map<string, Set<string>>();
+
+    const addWarehouseCode = (rawCode?: string | null) => {
+      const code = rawCode?.trim();
+      if (code) {
+        relevantWarehouses.add(code);
+      }
+    };
+
+    const registerLocation = (location?: MovementLocationSummary | null) => {
+      const locationCode = location?.locationCode?.trim();
+      const warehouseCode = location?.warehouseCode?.trim();
+      if (!locationCode) {
+        return;
+      }
+
+      if (warehouseCode) {
+        addWarehouseCode(warehouseCode);
+        if (!locationCatalog[locationCode]) {
+          const existingSet = locationRequests.get(warehouseCode) ?? new Set<string>();
+          existingSet.add(locationCode);
+          locationRequests.set(warehouseCode, existingSet);
+        }
+      }
+    };
+
+    if (product?.inventory) {
+      product.inventory.forEach((entry) => {
+        addWarehouseCode(entry.warehouseCode);
+        if (entry.locationCode?.trim() && entry.warehouseCode?.trim() && !locationCatalog[entry.locationCode.trim()]) {
+          const code = entry.warehouseCode.trim();
+          const requestSet = locationRequests.get(code) ?? new Set<string>();
+          requestSet.add(entry.locationCode.trim());
+          locationRequests.set(code, requestSet);
+        }
+      });
+    }
+
+    movementState.items.forEach((movement) => {
+      registerLocation(movement.from);
+      registerLocation(movement.to);
+    });
+
+    const missingWarehouses = Array.from(relevantWarehouses).filter(
+      (code) => code && !warehouseCatalog[code],
+    );
+
+    let cancelled = false;
+
+    if (missingWarehouses.length > 0 && !warehouseFetchInProgressRef.current) {
+      warehouseFetchInProgressRef.current = true;
+      fetchWarehouses()
+        .then((response) => {
+          if (cancelled || !response?.items) {
+            return;
+          }
+
+          setWarehouseCatalog((prev) => {
+            const next: Record<string, ApiWarehouse> = { ...prev };
+            response.items.forEach((warehouse) => {
+              if (warehouse?.code) {
+                next[warehouse.code] = warehouse;
+              }
+            });
+            return next;
+          });
+        })
+        .catch((error) => {
+          console.error('[deepflow] Failed to load warehouse catalog', error);
+        })
+        .finally(() => {
+          warehouseFetchInProgressRef.current = false;
+        });
+    }
+
+    const locationFetchTargets = Array.from(locationRequests.entries())
+      .map(([warehouseCode]) => warehouseCode)
+      .filter((code) => {
+        if (!code) {
+          return false;
+        }
+        const status = locationFetchStateRef.current[code];
+        return status !== 'loading';
+      });
+
+    if (locationFetchTargets.length > 0) {
+      locationFetchTargets.forEach((code) => {
+        locationFetchStateRef.current[code] = 'loading';
+      });
+
+      Promise.all(
+        locationFetchTargets.map(async (code) => {
+          try {
+            const response = await fetchLocations(code, { pageSize: 500 });
+            if (cancelled || !response?.items) {
+              return;
+            }
+            setLocationCatalog((prev) => {
+              const next: Record<string, ApiLocation> = { ...prev };
+              response.items.forEach((location) => {
+                if (location?.code) {
+                  next[location.code] = location;
+                }
+              });
+              return next;
+            });
+            locationFetchStateRef.current[code] = 'loaded';
+          } catch (error) {
+            console.error(`[deepflow] Failed to load locations for warehouse ${code}`, error);
+            locationFetchStateRef.current[code] = 'idle';
+          }
+        }),
+      ).catch((error) => {
+        console.error('[deepflow] Failed to load location catalog', error);
+      });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [product, movementState.items, warehouseCatalog, locationCatalog]);
+
+  useEffect(() => {
+    const legacyId = Number.isFinite(product?.legacyProductId)
+      ? Number(product?.legacyProductId)
+      : null;
+    if (!legacyId) {
+      setStockLevels(null);
+      return;
+    }
+    const requestId = ++stockLevelsRequestIdRef.current;
+    let cancelled = false;
+    fetchStockLevels({ productId: legacyId })
+      .then((response) => {
+        if (cancelled || stockLevelsRequestIdRef.current !== requestId) {
+          return;
+        }
+        const items = Array.isArray(response?.items) ? response.items : [];
+        setStockLevels(items);
+        if (items.length > 0) {
+          setLocationCatalog((prev) => {
+            const next = { ...prev };
+            items.forEach((item) => {
+              const location = item.location;
+              if (location?.code) {
+                next[location.code] = location;
+              }
+            });
+            return next;
+          });
+          setWarehouseCatalog((prev) => {
+            const next = { ...prev };
+            items.forEach((item) => {
+              const warehouse = item.location?.warehouse;
+              if (warehouse?.code) {
+                next[warehouse.code] = warehouse;
+              }
+            });
+            return next;
+          });
+        }
+      })
+      .catch((error) => {
+        console.error('[deepflow] Failed to load stock levels', error);
+        if (!cancelled) {
+          setStockLevels(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [product?.legacyProductId]);
+
+  const resolveWarehouseLocation = useCallback(
+    (warehouseCode?: string | null, locationCode?: string | null) => {
+      const normalizedWarehouseCode = warehouseCode?.trim() ?? '';
+      const normalizedLocationCode = locationCode?.trim() ?? '';
+      const locationRecord = normalizedLocationCode ? locationCatalog[normalizedLocationCode] : undefined;
+      const warehouseRecord = normalizedWarehouseCode ? warehouseCatalog[normalizedWarehouseCode] : undefined;
+      const registryLabel = getLocationLabel(normalizedWarehouseCode, normalizedLocationCode);
+
+      const warehouseName =
+        locationRecord?.warehouse?.name?.trim() ??
+        warehouseRecord?.name?.trim() ??
+        registryLabel?.warehouseName?.trim() ??
+        null;
+
+      const locationName =
+        locationRecord?.description?.trim() ??
+        locationRecord?.name?.trim() ??
+        registryLabel?.locationName?.trim() ??
+        null;
+
+      return formatWarehouseLocationLabel(warehouseName, locationName);
+    },
+    [locationCatalog, warehouseCatalog],
+  );
+
+  const resolveLocationLabel = useCallback(
+    (location?: MovementLocationSummary | null) => {
+      if (!location) {
+        return undefined;
+      }
+
+      return resolveWarehouseLocation(location.warehouseCode, location.locationCode);
+    },
+    [resolveWarehouseLocation],
+  );
+
+  const resolvePartnerLabel = useCallback(
+    (partnerId?: string | null) => {
+      if (!partnerId) {
+        return '거래처 정보 없음';
+      }
+
+      const name = partnerCatalog[partnerId];
+      if (name) {
+        return name;
+      }
+
+      return '미등록 거래처';
+    },
+    [partnerCatalog],
+  );
+
   const inventoryEntries = useMemo(() => {
+    const reserveLookup = new Map<string, number>();
+    (product?.inventory ?? []).forEach((entry) => {
+      const warehouseCode = entry.warehouseCode?.trim() ?? '';
+      const locationCode = entry.locationCode?.trim() ?? '';
+      reserveLookup.set(`${warehouseCode}::${locationCode}`, entry.reserved ?? 0);
+    });
+
+    if (stockLevels && stockLevels.length > 0) {
+      return stockLevels.map((item) => {
+        const warehouseCode =
+          item.location?.warehouseCode ??
+          item.location?.warehouse?.code ??
+          '';
+        const warehouseName = item.location?.warehouse?.name?.trim() ?? null;
+        const locationCode = item.location?.code ?? '';
+        const locationName = item.location?.description?.trim() ?? null;
+        const label = formatWarehouseLocationLabel(warehouseName, locationName);
+        const key = `${warehouseCode || 'unknown-warehouse'}-${locationCode || 'unknown-location'}`;
+        const reserved = reserveLookup.get(`${warehouseCode}::${locationCode}`) ?? 0;
+        return {
+          key,
+          label,
+          onHand: item.quantity ?? 0,
+          reserved,
+        };
+      });
+    }
+
     if (!product?.inventory || product.inventory.length === 0) {
       return [];
     }
 
-    return product.inventory.map((entry) => ({
-      key: `${entry.warehouseCode}-${entry.locationCode}`,
-      warehouseCode: entry.warehouseCode || '미지정 창고',
-      locationCode: entry.locationCode || '미지정 위치',
-      onHand: entry.onHand,
-      reserved: entry.reserved,
-    }));
-  }, [product]);
+    return product.inventory.map((entry) => {
+      const warehouseCode = entry.warehouseCode?.trim() ?? '';
+      const locationCode = entry.locationCode?.trim() ?? '';
+
+      return {
+        key: `${warehouseCode || 'unknown-warehouse'}-${locationCode || 'unknown-location'}`,
+        label: resolveWarehouseLocation(warehouseCode, locationCode),
+        onHand: entry.onHand,
+        reserved: entry.reserved,
+      };
+    });
+  }, [product, resolveWarehouseLocation, stockLevels]);
 
   const totalInventory = useMemo(() => {
     const onHand = Number.isFinite(product?.onHand ?? NaN) ? Number(product?.onHand) : 0;
@@ -155,6 +507,7 @@ const ProductDetailPanel: React.FC<ProductDetailPanelProps> = ({ product }) => {
       ISSUE: '출고',
       ADJUST: '조정',
       TRANSFER: '이동',
+      RETURN: '반품',
     }),
     [],
   );
@@ -165,41 +518,33 @@ const ProductDetailPanel: React.FC<ProductDetailPanelProps> = ({ product }) => {
       ISSUE: 'text-rose-600',
       ADJUST: 'text-slate-600',
       TRANSFER: 'text-indigo-600',
+      RETURN: 'text-emerald-600',
     }),
     [],
   );
 
-  const formatLocationSegment = (location?: { warehouseCode?: string; locationCode?: string } | null) => {
-    if (!location) {
-      return undefined;
-    }
-
-    const parts = [location.warehouseCode, location.locationCode].filter((part): part is string => Boolean(part && part.trim()));
-    if (parts.length === 0) {
-      return undefined;
-    }
-    return parts.join(' · ');
-  };
-
   const describeMovementLocation = (movement: MovementSummary) => {
-    const partnerLabel = movement.partnerId ? `거래처 ${movement.partnerId}` : '거래처 미지정';
+    const partnerLabel = resolvePartnerLabel(movement.partnerId);
 
     if (movement.type === 'TRANSFER') {
-      const fromLabel = formatLocationSegment(movement.from);
-      const toLabel = formatLocationSegment(movement.to);
-      const locationLabel = fromLabel || toLabel ? `${fromLabel ?? '미지정'} → ${toLabel ?? '미지정'}` : '창고 정보 없음';
+      const fromLabel = resolveLocationLabel(movement.from);
+      const toLabel = resolveLocationLabel(movement.to);
+      const locationLabel =
+        fromLabel || toLabel
+          ? `${fromLabel ?? '미지정 창고'} → ${toLabel ?? '미지정 창고'}`
+          : '창고 정보 없음';
       return { partnerLabel, locationLabel };
     }
 
     if (movement.type === 'ISSUE') {
-      const fromLabel = formatLocationSegment(movement.from);
+      const fromLabel = resolveLocationLabel(movement.from);
       return {
         partnerLabel,
         locationLabel: fromLabel ?? '출고 창고 미지정',
       };
     }
 
-    const toLabel = formatLocationSegment(movement.to);
+    const toLabel = resolveLocationLabel(movement.to);
     return {
       partnerLabel,
       locationLabel: toLabel ?? '입고 창고 미지정',
@@ -307,9 +652,7 @@ const ProductDetailPanel: React.FC<ProductDetailPanelProps> = ({ product }) => {
                           <div className="mt-1 text-sm font-medium text-slate-900">
                             {movementDateFormatter.format(new Date(latestReceipt.occurredAt))}
                           </div>
-                          <div className="text-xs text-slate-500">
-                            {latestReceipt.partnerId ? `거래처 ${latestReceipt.partnerId}` : '거래처 정보 없음'}
-                          </div>
+                          <div className="text-xs text-slate-500">{resolvePartnerLabel(latestReceipt.partnerId)}</div>
                         </div>
                         <div className="text-right text-sm font-semibold text-emerald-600">
                           +{latestReceipt.qty.toLocaleString()} EA
@@ -323,9 +666,7 @@ const ProductDetailPanel: React.FC<ProductDetailPanelProps> = ({ product }) => {
                           <div className="mt-1 text-sm font-medium text-slate-900">
                             {movementDateFormatter.format(new Date(latestIssue.occurredAt))}
                           </div>
-                          <div className="text-xs text-slate-500">
-                            {latestIssue.partnerId ? `거래처 ${latestIssue.partnerId}` : '거래처 정보 없음'}
-                          </div>
+                          <div className="text-xs text-slate-500">{resolvePartnerLabel(latestIssue.partnerId)}</div>
                         </div>
                         <div className="text-right text-sm font-semibold text-rose-600">
                           -{latestIssue.qty.toLocaleString()} EA
@@ -363,9 +704,7 @@ const ProductDetailPanel: React.FC<ProductDetailPanelProps> = ({ product }) => {
                 ) : (
                   inventoryEntries.map((entry) => (
                     <div key={entry.key} className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                      <div className="text-xs font-semibold text-slate-500">
-                        {entry.warehouseCode} · {entry.locationCode}
-                      </div>
+                      <div className="text-xs font-semibold text-slate-500">{entry.label}</div>
                       <div className="mt-1 flex items-center justify-between text-sm">
                         <span className="text-slate-600">가용 재고</span>
                         <span className="font-semibold text-slate-900">{(entry.onHand - entry.reserved).toLocaleString()}</span>

@@ -1,6 +1,7 @@
 import { emitInventoryRefreshEvent, type InventoryMovementLike } from '../app/utils/inventoryEvents';
 import type { ProductRecordMock } from '../mocks/products';
 import { productCatalog } from '../mocks/products';
+import { isUtcWithinKstToday } from '@/shared/datetime/kst';
 
 export type PartnerType = 'SUPPLIER' | 'CUSTOMER';
 
@@ -188,6 +189,14 @@ const generateId = (prefix: string): string => {
 
 const findProductRecord = (sku: string): ProductRecordMock | undefined =>
   productCatalog.items.find((item) => item.sku === sku);
+
+const ensureValidUtcTimestamp = (value: string): number => {
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) {
+    throw new Error('유효한 날짜와 시간을 입력해주세요.');
+  }
+  return timestamp;
+};
 
 const applyReceiptToProductInventory = (
   lines: OrderFulfillmentLineEvent[],
@@ -942,6 +951,7 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput) {
   if (!partner || partner.type !== 'SUPPLIER' || partner.isActive === false) {
     throw new Error('유효한 공급업체를 선택하세요.');
   }
+  ensureValidUtcTimestamp(input.scheduledAt);
   const orderId = generateId('po');
   const now = new Date().toISOString();
   const status = input.status ?? 'DRAFT';
@@ -1013,6 +1023,10 @@ export async function createSalesOrder(input: CreateSalesOrderInput) {
   const partner = findPartner(input.partnerId);
   if (!partner || partner.isActive === false) {
     throw new Error('유효한 거래처를 선택해주세요.');
+  }
+  const scheduledAtUtc = ensureValidUtcTimestamp(input.scheduledAt);
+  if (!isUtcWithinKstToday(scheduledAtUtc)) {
+    throw new Error('출고 주문은 KST 기준 오늘(00:00~23:59)만 선택 가능합니다.');
   }
   const orderId = generateId('so');
   const now = new Date().toISOString();

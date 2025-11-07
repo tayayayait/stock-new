@@ -22,6 +22,8 @@ import {
 } from '../../../services/api';
 import { submitMovement, type CreateMovementPayload } from '../../../services/movements';
 import type { OrdersLocation, OrdersWarehouse, WarehouseLocationSelection } from '../components/types';
+import { formatWarehouseLocationLabel } from '../../../utils/warehouse';
+import { convertKstDateTimeLocalToIso, formatKstDateTimeLabelFromLocal } from '@/shared/datetime/kst';
 
 const normalizeWarehouse = (warehouse: ApiWarehouse): OrdersWarehouse => ({
   id: String(warehouse.id ?? warehouse.code),
@@ -56,8 +58,7 @@ type OrderCreationSummary = {
   quantities: Array<{ unit: string; quantity: number }>;
   partnerName?: string | null;
   scheduledDate: string;
-  warehouseCode: string;
-  locationCode: string;
+  warehouseLocationLabel: string;
 };
 
 const aggregateQuantitiesByUnit = (
@@ -186,6 +187,24 @@ const OrdersPage: React.FC = () => {
     });
   }, [loadProductCatalog]);
 
+  const resolveWarehouseLocationLabel = React.useCallback(
+    (warehouseCode?: string | null, locationCode?: string | null) => {
+      if (!warehouseCode) {
+        return formatWarehouseLocationLabel();
+      }
+      const warehouse = warehouses.find((entry) => entry.code === warehouseCode) ?? null;
+      const locationList = locationsByWarehouse[warehouseCode] ?? [];
+      const location =
+        locationCode && locationList.length > 0
+          ? locationList.find((entry) => entry.code === locationCode) ?? null
+          : null;
+      const warehouseName = warehouse?.name ?? null;
+      const locationName = location?.name ?? location?.description ?? null;
+      return formatWarehouseLocationLabel(warehouseName, locationName);
+    },
+    [locationsByWarehouse, warehouses],
+  );
+
   const handleCreateOrder = React.useCallback(
     async (form: NewOrderFormState) => {
       try {
@@ -197,7 +216,11 @@ const OrdersPage: React.FC = () => {
         ) {
           throw new Error('창고와 상세위치를 선택해주세요.');
         }
-        const scheduledAtIso = new Date(form.scheduledAt).toISOString();
+        const scheduledAtIso = convertKstDateTimeLocalToIso(form.scheduledAt);
+        if (!scheduledAtIso) {
+          throw new Error('유효한 날짜와 시간을 선택해주세요.');
+        }
+        const scheduledDateLabel = formatKstDateTimeLabelFromLocal(form.scheduledAt) ?? form.scheduledAt;
         if (form.orderKind === 'purchase') {
           const order = await createPurchaseOrder({
             partnerId: form.partnerId,
@@ -253,9 +276,11 @@ const OrdersPage: React.FC = () => {
             itemCount: order.items.length,
             quantities: aggregateQuantitiesByUnit(order.items),
             partnerName: partners.find((entry) => entry.id === form.partnerId)?.name ?? null,
-            scheduledDate: form.scheduledAt,
-            warehouseCode: form.warehouseCode,
-            locationCode: form.detailedLocationCode,
+            scheduledDate: scheduledDateLabel,
+            warehouseLocationLabel: resolveWarehouseLocationLabel(
+              order.warehouseCode ?? form.warehouseCode,
+              order.detailedLocationCode ?? form.detailedLocationCode,
+            ),
           });
           setCompletionModalOpen(true);
           setOrderKind('purchase');
@@ -341,9 +366,11 @@ const OrdersPage: React.FC = () => {
             itemCount: order.items.length,
             quantities: aggregateQuantitiesByUnit(order.items),
             partnerName: partners.find((entry) => entry.id === form.partnerId)?.name ?? null,
-            scheduledDate: form.scheduledAt,
-            warehouseCode: form.warehouseCode,
-            locationCode: form.detailedLocationCode,
+            scheduledDate: scheduledDateLabel,
+            warehouseLocationLabel: resolveWarehouseLocationLabel(
+              order.warehouseCode ?? form.warehouseCode,
+              order.detailedLocationCode ?? form.detailedLocationCode,
+            ),
           });
           setCompletionModalOpen(true);
           setOrderKind('sales');
@@ -354,7 +381,7 @@ const OrdersPage: React.FC = () => {
         throw err;
       }
     },
-    [partners],
+    [partners, resolveWarehouseLocationLabel],
   );
 
   const handleFormSubmitSuccess = React.useCallback(({ resetForm }: { resetForm: () => void }) => {
@@ -549,12 +576,8 @@ const OrdersPage: React.FC = () => {
                 </dd>
               </div>
               <div className="flex items-center justify-between">
-                <dt className="text-xs font-semibold text-slate-500">창고</dt>
-                <dd className="text-sm font-medium text-slate-800">{orderCreationSummary.warehouseCode}</dd>
-              </div>
-              <div className="flex items-center justify-between">
-                <dt className="text-xs font-semibold text-slate-500">상세위치</dt>
-                <dd className="text-sm font-medium text-slate-800">{orderCreationSummary.locationCode}</dd>
+                <dt className="text-xs font-semibold text-slate-500">창고 / 상세위치</dt>
+                <dd className="text-sm font-medium text-slate-800">{orderCreationSummary.warehouseLocationLabel}</dd>
               </div>
               <div className="flex items-center justify-between">
                 <dt className="text-xs font-semibold text-slate-500">

@@ -7,6 +7,17 @@ import WarehouseLocationSelect from './WarehouseLocationSelect';
 import type { OrdersLocation, OrdersWarehouse, WarehouseLocationSelection } from './types';
 import { formatWarehouseLocationLabel } from '../../../utils/warehouse';
 import { useToast } from '../../../components/Toaster';
+import {
+  describeKstTodayWindow,
+  detectTimePickerUiMode,
+  ensureDateTimeLocalPrecision,
+  formatDateTimeLocalFromUtc,
+  formatKstDateTimeLabelFromLocal,
+  formatUtcDateTimeLabelFromLocal,
+  isKstDateTimeLocalWithinBounds,
+  parseKstDateTimeLocal,
+  type DeviceUiMode,
+} from '@/shared/datetime/kst';
 
 type OrderItemDraft = {
   productId: string | null;
@@ -70,6 +81,7 @@ const buildInitialItem = (): OrderItemDraft => ({
 });
 
 const LAST_SELECTION_STORAGE_KEY = 'orders:lastWarehouseSelection';
+const MINUTE_IN_MS = 60 * 1000;
 
 const filterActivePartners = (partners: Partner[]) => partners.filter((partner) => partner.isActive !== false);
 
@@ -181,6 +193,11 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
   const hasLoadedProductsRef = React.useRef(products !== undefined);
   const isMountedRef = React.useRef(true);
   const [hideZeroWarehouseStock, setHideZeroWarehouseStock] = React.useState(false);
+  const [timePickerMode, setTimePickerMode] = React.useState<DeviceUiMode>(() => detectTimePickerUiMode());
+  const [salesWindow, setSalesWindow] = React.useState(() => describeKstTodayWindow());
+  const scheduledAtHelperTextId = React.useId();
+  const scheduledAtPreviewId = React.useId();
+  const scheduledAtErrorId = React.useId();
 
   const createInitialState = React.useCallback(
     (kind: OrderKind = defaultKind): NewOrderFormState => ({
@@ -200,6 +217,36 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const media = window.matchMedia('(pointer: coarse)');
+    const updateMode = () => setTimePickerMode(media.matches ? 'dial' : 'spinner');
+    updateMode();
+    if (typeof media.addEventListener === 'function') {
+      media.addEventListener('change', updateMode);
+      return () => media.removeEventListener('change', updateMode);
+    }
+    if (typeof media.addListener === 'function') {
+      media.addListener(updateMode);
+      return () => media.removeListener(updateMode);
+    }
+    return undefined;
+  }, []);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      setSalesWindow(describeKstTodayWindow());
+    }, 60 * 1000);
+    return () => {
+      window.clearInterval(intervalId);
     };
   }, []);
 
@@ -368,6 +415,118 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
     }
   }, [productLoadError]);
 
+  const clampScheduledValue = React.useCallback(
+    (value: string, kind: OrderKind): string => {
+      if (kind !== 'sales' || !value) {
+        return value;
+      }
+      const utcMs = parseKstDateTimeLocal(value);
+      if (utcMs === null) {
+        return value;
+      }
+      const { bounds } = salesWindow;
+      if (!bounds) {
+        return value;
+      }
+      if (utcMs < bounds.startUtcMs) {
+        return formatDateTimeLocalFromUtc(bounds.startUtcMs);
+      }
+      if (utcMs > bounds.endUtcMs) {
+        return formatDateTimeLocalFromUtc(bounds.endUtcMs);
+      }
+      return value;
+    },
+    [salesWindow],
+  );
+
+  const isSalesOrder = formState.orderKind === 'sales';
+  const salesBounds = isSalesOrder ? salesWindow.bounds : null;
+  const scheduleMin = salesBounds ? formatDateTimeLocalFromUtc(salesBounds.startUtcMs) : undefined;
+  const scheduleMax = salesBounds ? formatDateTimeLocalFromUtc(salesBounds.endUtcMs) : undefined;
+  const salesWindowLabel = salesWindow.label;
+
+  const handleScheduledAtChange = React.useCallback(
+    (value: string) => {
+      setFormState((prev) => {
+        const normalizedValue = value ? ensureDateTimeLocalPrecision(value) : '';
+        if (!normalizedValue) {
+          return { ...prev, scheduledAt: '' };
+        }
+        const nextValue = clampScheduledValue(normalizedValue, prev.orderKind);
+        return { ...prev, scheduledAt: nextValue };
+      });
+      setError(null);
+    },
+    [clampScheduledValue],
+  );
+
+  const adjustScheduledAtByMinutes = React.useCallback(
+    (minutes: number) => {
+      setFormState((prev) => {
+        if (!prev.scheduledAt) {
+          return prev;
+        }
+        const utcMs = parseKstDateTimeLocal(prev.scheduledAt);
+        if (utcMs === null) {
+          return prev;
+        }
+        const nextValue = formatDateTimeLocalFromUtc(utcMs + minutes * MINUTE_IN_MS);
+        if (!nextValue) {
+          return prev;
+        }
+        const clamped = clampScheduledValue(nextValue, prev.orderKind);
+        if (clamped === prev.scheduledAt) {
+          return prev;
+        }
+        return { ...prev, scheduledAt: clamped };
+      });
+      setError(null);
+    },
+    [clampScheduledValue],
+  );
+
+  const handleScheduledAtKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        handleScheduledAtChange('');
+        return;
+      }
+      if (!formState.scheduledAt) {
+        return;
+      }
+      if (event.key === 'PageUp') {
+        event.preventDefault();
+        adjustScheduledAtByMinutes(60);
+        return;
+      }
+      if (event.key === 'PageDown') {
+        event.preventDefault();
+        adjustScheduledAtByMinutes(-60);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        adjustScheduledAtByMinutes(1);
+        return;
+      }
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        adjustScheduledAtByMinutes(-1);
+        return;
+      }
+      if (event.key === 'Home' && scheduleMin) {
+        event.preventDefault();
+        handleScheduledAtChange(scheduleMin);
+      }
+      if (event.key === 'End' && scheduleMax) {
+        event.preventDefault();
+        handleScheduledAtChange(scheduleMax);
+      }
+    },
+    [adjustScheduledAtByMinutes, formState.scheduledAt, handleScheduledAtChange, scheduleMax, scheduleMin],
+  );
+
   const handleRetryProducts = React.useCallback(() => {
     if (isFetchingProductsRef.current) {
       return;
@@ -394,10 +553,11 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
         ...prev,
         orderKind: kind,
         partnerId: resolvePartnerId(kind),
+        scheduledAt: prev.scheduledAt ? clampScheduledValue(prev.scheduledAt, kind) : '',
       }));
       onKindChange?.(kind);
     },
-    [onKindChange, resolvePartnerId],
+    [clampScheduledValue, onKindChange, resolvePartnerId],
   );
 
   const handleChangeItem = React.useCallback((index: number, patch: Partial<OrderItemDraft>) => {
@@ -666,34 +826,95 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
     }));
   }, [formState.detailedLocationId, formState.detailedLocationCode, formState.warehouseCode, formState.warehouseId, locationsByWarehouse, warehouses]);
 
+  const resolvedWarehouseRecord = React.useMemo(() => {
+    if (!formState.warehouseId && !formState.warehouseCode) {
+      return null;
+    }
+    return (
+      warehouses.find(
+        (entry) =>
+          (formState.warehouseId && entry.id === formState.warehouseId) ||
+          (formState.warehouseCode && entry.code === formState.warehouseCode),
+      ) ?? null
+    );
+  }, [formState.warehouseCode, formState.warehouseId, warehouses]);
+
+  const resolvedWarehouseCode = resolvedWarehouseRecord?.code ?? formState.warehouseCode ?? null;
+
+  const resolvedLocationRecord = React.useMemo(() => {
+    if (!resolvedWarehouseCode) {
+      return null;
+    }
+    const locationList = locationsByWarehouse[resolvedWarehouseCode] ?? [];
+    return (
+      locationList.find(
+        (entry) =>
+          (formState.detailedLocationId && entry.id === formState.detailedLocationId) ||
+          (formState.detailedLocationCode && entry.code === formState.detailedLocationCode),
+      ) ?? null
+    );
+  }, [
+    formState.detailedLocationCode,
+    formState.detailedLocationId,
+    locationsByWarehouse,
+    resolvedWarehouseCode,
+  ]);
+
   const selectedWarehouseLabel = React.useMemo(() => {
-    if (!formState.warehouseId || !formState.detailedLocationId) {
+    if (!formState.warehouseCode || !formState.detailedLocationCode) {
       return '';
     }
-    const warehouse = warehouses.find(
-      (entry) =>
-        (formState.warehouseId && entry.id === formState.warehouseId) ||
-        (formState.warehouseCode && entry.code === formState.warehouseCode),
-    );
-    const warehouseCode = warehouse?.code ?? formState.warehouseCode;
-    const locationList = warehouseCode ? locationsByWarehouse[warehouseCode] ?? [] : [];
-    const location = locationList.find(
-      (entry) => entry.id === formState.detailedLocationId || entry.code === formState.detailedLocationCode,
-    );
-    if (warehouse && location) {
-      return formatWarehouseLocationLabel(
-        warehouse.name ?? warehouse.code,
-        location.name ?? location.description ?? location.code,
-      );
+    const warehouseName = resolvedWarehouseRecord?.name ?? null;
+    const locationName = resolvedLocationRecord?.name ?? resolvedLocationRecord?.description ?? null;
+    return formatWarehouseLocationLabel(warehouseName, locationName);
+  }, [
+    formState.detailedLocationCode,
+    formState.warehouseCode,
+    resolvedLocationRecord,
+    resolvedWarehouseRecord,
+  ]);
+
+  const scheduleHelperText = React.useMemo(() => {
+    const baseText =
+      '방향키·PageUp/PageDown·Enter 키로 날짜와 시간을 조정하고 Esc로 초기화할 수 있습니다. 모든 시간은 KST(UTC+9) 기준으로 입력됩니다.';
+    if (!isSalesOrder) {
+      return baseText;
     }
-    if (warehouse && formState.detailedLocationCode) {
-      return formatWarehouseLocationLabel(warehouse.name ?? warehouse.code, formState.detailedLocationCode);
+    return `${baseText} 출고 주문은 ${salesWindowLabel} 범위 내에서만 선택 가능합니다.`;
+  }, [isSalesOrder, salesWindowLabel]);
+
+  const scheduleValidationMessage = React.useMemo(() => {
+    if (!formState.scheduledAt) {
+      return null;
     }
-    if (formState.warehouseCode && formState.detailedLocationCode) {
-      return formatWarehouseLocationLabel(formState.warehouseCode, formState.detailedLocationCode);
+    if (parseKstDateTimeLocal(formState.scheduledAt) === null) {
+      return '유효한 날짜와 시간을 입력해주세요.';
     }
-    return '';
-  }, [formState.detailedLocationCode, formState.detailedLocationId, formState.warehouseCode, formState.warehouseId, locationsByWarehouse, warehouses]);
+    if (isSalesOrder && salesBounds && !isKstDateTimeLocalWithinBounds(formState.scheduledAt, salesBounds)) {
+      return `출고 주문은 ${salesWindowLabel} 범위 내에서만 선택 가능합니다.`;
+    }
+    return null;
+  }, [formState.scheduledAt, isSalesOrder, salesBounds, salesWindowLabel]);
+
+  const schedulePreviewText = React.useMemo(() => {
+    if (!formState.scheduledAt) {
+      return '날짜와 시간을 선택하면 KST와 UTC 기준 값을 바로 확인할 수 있습니다.';
+    }
+    const kstLabel = formatKstDateTimeLabelFromLocal(formState.scheduledAt);
+    const utcLabel = formatUtcDateTimeLabelFromLocal(formState.scheduledAt);
+    if (!kstLabel || !utcLabel) {
+      return '유효한 날짜와 시간을 입력해주세요.';
+    }
+    return `${kstLabel} · ${utcLabel}`;
+  }, [formState.scheduledAt]);
+
+  const scheduledAtDescribedBy = React.useMemo(() => {
+    const ids = [scheduledAtHelperTextId, scheduledAtPreviewId];
+    if (scheduleValidationMessage) {
+      ids.push(scheduledAtErrorId);
+    }
+    return ids.join(' ');
+  }, [scheduleValidationMessage, scheduledAtErrorId, scheduledAtHelperTextId, scheduledAtPreviewId]);
 
   const handleSubmit = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -703,6 +924,18 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
       try {
         if (!formState.scheduledAt) {
           setError(formState.orderKind === 'purchase' ? '입고일을 선택해주세요.' : '출고일을 선택해주세요.');
+          return;
+        }
+        if (parseKstDateTimeLocal(formState.scheduledAt) === null) {
+          setError('유효한 날짜와 시간을 입력해주세요.');
+          return;
+        }
+        if (
+          formState.orderKind === 'sales' &&
+          salesBounds &&
+          !isKstDateTimeLocalWithinBounds(formState.scheduledAt, salesBounds)
+        ) {
+          setError(`출고 주문은 ${salesWindowLabel} 범위 내에서만 선택 가능합니다.`);
           return;
         }
         if (!formState.partnerId || !partnerOptions.some((partner) => partner.id === formState.partnerId)) {
@@ -764,7 +997,7 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
         setSubmitting(false);
       }
     },
-    [formState, onSubmit, onSubmitSuccess, partnerOptions, resetFormState, showToast],
+    [formState, onSubmit, onSubmitSuccess, partnerOptions, resetFormState, salesBounds, salesWindowLabel, showToast],
   );
 
   return (
@@ -870,19 +1103,49 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
       </div>
 
       <div>
-        <label className="mb-1 block text-xs font-semibold text-slate-500" htmlFor="scheduledAt">
-          {formState.orderKind === 'purchase' ? '입고일' : '출고일'}
-        </label>
+        <div className="mb-1 flex items-center justify-between">
+          <label className="block text-xs font-semibold text-slate-500" htmlFor="scheduledAt">
+            {formState.orderKind === 'purchase' ? '입고일' : '출고일'}
+          </label>
+          <span className="sr-only">KST · UTC 저장</span>
+        </div>
         <input
           id="scheduledAt"
-          type="date"
+          type="datetime-local"
           className="w-full rounded-md border border-slate-200 px-3 py-2"
           value={formState.scheduledAt}
-          onChange={(event) => {
-            setFormState((prev) => ({ ...prev, scheduledAt: event.target.value }));
-            setError(null);
-          }}
+          onChange={(event) => handleScheduledAtChange(event.target.value)}
+          onKeyDown={handleScheduledAtKeyDown}
+          step={60}
+          min={scheduleMin}
+          max={scheduleMax}
+          aria-describedby={scheduledAtDescribedBy}
+          aria-errormessage={scheduleValidationMessage ? scheduledAtErrorId : undefined}
+          aria-invalid={scheduleValidationMessage ? true : undefined}
+          data-time-ui-mode={timePickerMode}
+          inputMode={timePickerMode === 'dial' ? 'numeric' : 'text'}
+          title={
+            timePickerMode === 'dial'
+              ? '현재 장치는 다이얼형 시간 선택 UI를 기본으로 사용합니다.'
+              : '현재 장치는 숫자형 스크롤 시간 선택 UI를 기본으로 사용합니다.'
+          }
         />
+        <p id={scheduledAtHelperTextId} className="sr-only">
+          {scheduleHelperText}
+        </p>
+        <div
+          id={scheduledAtPreviewId}
+          role="status"
+          aria-live="polite"
+          className="sr-only"
+        >
+          미리보기: {schedulePreviewText}
+        </div>
+        {scheduleValidationMessage ? (
+          <p id={scheduledAtErrorId} role="alert" className="mt-1 text-xs font-semibold text-rose-600">
+            {scheduleValidationMessage}
+          </p>
+        ) : null}
       </div>
 
       <div>
@@ -973,9 +1236,15 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
                 return null;
               }
               const baseUnit = selectedProduct?.unit ?? item.unit ?? DEFAULT_UNIT;
-              const warehouseText = `현재 재고: ${(warehouseQuantity ?? 0).toLocaleString('ko-KR')} ${baseUnit} (${formState.warehouseCode})`;
+              const warehouseLabel =
+                resolvedWarehouseRecord?.name?.trim() ?? '선택한 창고';
+              const warehouseText = `현재 재고: ${(warehouseQuantity ?? 0).toLocaleString('ko-KR')} ${baseUnit} (${warehouseLabel})`;
               if (formState.detailedLocationCode?.trim()) {
-                const locationText = `${formState.detailedLocationCode}: ${(locationQuantity ?? 0).toLocaleString('ko-KR')} ${baseUnit}`;
+                const locationLabel =
+                  resolvedLocationRecord?.name?.trim() ??
+                  resolvedLocationRecord?.description?.trim() ??
+                  '선택한 상세위치';
+                const locationText = `${locationLabel}: ${(locationQuantity ?? 0).toLocaleString('ko-KR')} ${baseUnit}`;
                 return `${warehouseText} · 상세 위치 ${locationText}`;
               }
               return warehouseText;

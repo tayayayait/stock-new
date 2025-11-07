@@ -1,6 +1,6 @@
 ﻿import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import * as React from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   Partner,
@@ -28,6 +28,17 @@ const fetchWarehousesMock = vi.hoisted(() => vi.fn());
 const fetchLocationsMock = vi.hoisted(() => vi.fn());
 const fetchProductsMock = vi.hoisted(() => vi.fn());
 const submitMovementMock = vi.hoisted(() => vi.fn());
+
+const FIXED_NOW = new Date('2025-06-10T00:00:00.000Z');
+let dateNowSpy: ReturnType<typeof vi.spyOn> | null = null;
+
+beforeAll(() => {
+  dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => FIXED_NOW.getTime());
+});
+
+afterAll(() => {
+  dateNowSpy?.mockRestore();
+});
 
 const TEXT = {
   formTitle: '\uC0C8 \uC8FC\uBB38 \uC791\uC131',
@@ -383,7 +394,7 @@ const fillCommonFields = async () => {
   fireEvent.change(partnerSelect, { target: { value: 'partner-s-test' } });
 
   const dateInput = withinForm.getByLabelText(TEXT.inboundDateLabel) as HTMLInputElement;
-  fireEvent.change(dateInput, { target: { value: '2025-05-05' } });
+  fireEvent.change(dateInput, { target: { value: '2025-05-05T10:00' } });
 
   const searchInput = await withinForm.findByPlaceholderText(/SKU/);
   fireEvent.change(searchInput, { target: { value: 'apple' } });
@@ -487,6 +498,7 @@ describe('OrdersPage purchase flow', () => {
     }
     const orderPayload = createPurchaseOrderMock.mock.calls[0][0];
     expect(orderPayload.status).toBe('RECEIVED');
+    expect(orderPayload.scheduledAt).toBe('2025-05-05T01:00:00.000Z');
 
     try {
       await waitFor(() => expect(submitMovementMock).toHaveBeenCalledTimes(1));
@@ -502,6 +514,7 @@ describe('OrdersPage purchase flow', () => {
       qty: 12,
       toWarehouse: warehouses[0].code,
       toLocation: locationsByWarehouse['WHS-ICN'][0].code,
+      occurredAt: expect.any(String),
       refNo: purchaseDetail.id,
     });
   });
@@ -521,7 +534,7 @@ describe('OrdersPage sales flow', () => {
     fireEvent.change(partnerSelect, { target: { value: 'partner-c-test' } });
 
     const dateInput = withinForm.getByLabelText(TEXT.outboundDateLabel) as HTMLInputElement;
-    fireEvent.change(dateInput, { target: { value: '2025-06-10' } });
+    fireEvent.change(dateInput, { target: { value: '2025-06-10T10:00' } });
 
     const searchInput = await withinForm.findByPlaceholderText(/SKU/);
     fireEvent.change(searchInput, { target: { value: 'apple' } });
@@ -545,6 +558,8 @@ describe('OrdersPage sales flow', () => {
     fireEvent.click(submitButton);
 
     await waitFor(() => expect(createSalesOrderMock).toHaveBeenCalledTimes(1));
+    const salesOrderPayload = createSalesOrderMock.mock.calls[0][0];
+    expect(salesOrderPayload.scheduledAt).toBe('2025-06-10T01:00:00.000Z');
     await waitFor(() => expect(recordSalesShipmentMock).toHaveBeenCalledTimes(1));
     expect(recordSalesShipmentMock).toHaveBeenCalledWith(
       'so-test-1',
@@ -567,6 +582,7 @@ describe('OrdersPage sales flow', () => {
         qty: 7,
         fromWarehouse: warehouses[1].code,
         fromLocation: locationsByWarehouse['WHS-GSN'][0].code,
+        occurredAt: expect.any(String),
       }),
     );
   });

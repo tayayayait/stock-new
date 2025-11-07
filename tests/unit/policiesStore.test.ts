@@ -35,6 +35,7 @@ describe('policiesStore persistence', () => {
     savePolicyDrafts([
       {
         sku: 'SKU-TEST',
+        name: '테스트 제품',
         forecastDemand: 100,
         demandStdDev: 20,
         leadTimeDays: 5,
@@ -48,6 +49,7 @@ describe('policiesStore persistence', () => {
 
     expect(parsed).toHaveLength(1);
     expect(parsed[0].sku).toBe('SKU-TEST');
+    expect(parsed[0].name).toBe('테스트 제품');
     expect(parsed[0].serviceLevelPercent).toBe(95);
   });
 
@@ -55,6 +57,7 @@ describe('policiesStore persistence', () => {
     savePolicyDrafts([
       {
         sku: 'SKU-KEEP',
+        name: '보존 제품',
         forecastDemand: 80,
         demandStdDev: 15,
         leadTimeDays: 7,
@@ -70,6 +73,7 @@ describe('policiesStore persistence', () => {
     const drafts = listPolicyDrafts();
     expect(drafts).toHaveLength(1);
     expect(drafts[0].sku).toBe('SKU-KEEP');
+    expect(drafts[0].name).toBe('보존 제품');
     expect(drafts[0].leadTimeDays).toBe(7);
   });
 
@@ -77,6 +81,7 @@ describe('policiesStore persistence', () => {
     savePolicyDrafts([
       {
         sku: 'SKU-REMOVE',
+        name: '삭제 대상',
         forecastDemand: 50,
         demandStdDev: 10,
         leadTimeDays: 4,
@@ -84,6 +89,7 @@ describe('policiesStore persistence', () => {
       },
       {
         sku: 'SKU-KEEP',
+        name: '유지 대상',
         forecastDemand: 120,
         demandStdDev: 18,
         leadTimeDays: 9,
@@ -95,6 +101,7 @@ describe('policiesStore persistence', () => {
     savePolicyDrafts([
       {
         sku: 'SKU-KEEP',
+        name: '유지 대상',
         forecastDemand: 100,
         demandStdDev: 16,
         leadTimeDays: 8,
@@ -105,6 +112,7 @@ describe('policiesStore persistence', () => {
     const drafts = listPolicyDrafts();
     expect(drafts).toHaveLength(1);
     expect(drafts[0].sku).toBe('SKU-KEEP');
+    expect(drafts[0].name).toBe('유지 대상');
     expect(drafts[0].forecastDemand).toBe(100);
   });
 });

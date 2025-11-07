@@ -1,4 +1,4 @@
-import type { MovementRecord } from '../routes/movements.js';
+import type { MovementRecord } from '../../../shared/movements/types.js';
 
 type MovementTotals = { inbound: number; outbound: number; adjustments: number };
 
@@ -117,6 +117,11 @@ export function recordMovementForAnalytics(movement: MovementRecord): void {
 
   switch (movement.type) {
     case 'RECEIPT': {
+      inbound = movement.qty;
+      recordWarehouseMovement(bucket, movement.toWarehouse, movement.sku, movement.qty, 0, 0);
+      break;
+    }
+    case 'RETURN': {
       inbound = movement.qty;
       recordWarehouseMovement(bucket, movement.toWarehouse, movement.sku, movement.qty, 0, 0);
       break;

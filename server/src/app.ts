@@ -14,6 +14,10 @@ import productImagesRoutes from './routes/productImages.js';
 import inventoryDashboardRoutes from './routes/inventoryDashboard.js';
 import { ensureWarehouseSeedData } from './stores/warehousesStore.js';
 import { ensureLocationSeedData } from './stores/locationsStore.js';
+import {
+  startPendingMovementScheduler,
+  stopPendingMovementScheduler,
+} from './services/pendingMovementScheduler.js';
 
 export async function buildServer() {
   const server = Fastify({
@@ -35,6 +39,11 @@ export async function buildServer() {
   await server.register(csvRoutes, { prefix: '/api/csv' });
   await server.register(productImagesRoutes, { prefix: '/api/product-images' });
   await server.register(inventoryDashboardRoutes, { prefix: '/api/inventory' });
+
+  startPendingMovementScheduler();
+  server.addHook('onClose', () => {
+    stopPendingMovementScheduler();
+  });
 
   return server;
 }

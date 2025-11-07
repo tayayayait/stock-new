@@ -7,6 +7,8 @@ import { __resetInventoryStore } from '../stores/inventoryStore.js';
 import { __resetWarehouseStore } from '../stores/warehousesStore.js';
 import { __resetLocationStore } from '../stores/locationsStore.js';
 
+import { listPendingMovements } from '../stores/pendingMovementsStore.js';
+
 async function main() {
   __resetMovementStore();
   __resetProductStore(false);
@@ -141,10 +143,30 @@ async function main() {
         sku: 'SKU-01',
         qty: 999,
         fromWarehouse: 'WH-SEOUL',
+        occurredAt: '2024-05-05T09:00:00.000Z',
         userId: 'user-4',
       },
     });
     assert.equal(insufficientResponse.statusCode, 409);
+
+    const futureResponse = await server.inject({
+      method: 'POST',
+      url: '/api/movements',
+      payload: {
+        type: 'RECEIPT',
+        sku: 'SKU-01',
+        qty: 30,
+        toWarehouse: 'WH-SEOUL',
+        toLocation: 'SEOUL-A1',
+        occurredAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        userId: 'user-future',
+      },
+    });
+    assert.equal(futureResponse.statusCode, 202);
+    const futureBody = futureResponse.json() as any;
+    assert.ok(futureBody.pendingId);
+    const pendingRecords = listPendingMovements();
+    assert.ok(pendingRecords.some((record) => record.id === futureBody.pendingId));
 
     const transferList = await server.inject({ method: 'GET', url: '/api/movements?type=TRANSFER' });
     assert.equal(transferList.statusCode, 200);
@@ -180,6 +202,7 @@ async function main() {
         qty: 75,
         toWarehouse: 'WH-SEOUL',
         toLocation: 'SEOUL-A1',
+        occurredAt: '2024-05-06T09:00:00.000Z',
         userId: 'inventory-sync-test',
       },
     });

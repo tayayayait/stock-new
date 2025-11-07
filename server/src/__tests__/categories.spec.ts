@@ -13,7 +13,12 @@ async function main() {
     assert.equal(seedResponse.statusCode, 200);
     const seedBody = seedResponse.json() as any;
     assert.equal(seedBody.count, __getCategoryRecords().length);
-    assert.ok(seedBody.items.some((item: any) => item.name === '유제품'));
+    assert.equal(seedBody.count, 0);
+    assert.ok(
+      seedBody.items.every(
+        (item: any) => !['유제품', '가공식품', '신선식품'].includes(item.name as string),
+      ),
+    );
 
     const createResponse = await server.inject({
       method: 'POST',

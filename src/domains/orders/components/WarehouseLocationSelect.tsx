@@ -2,6 +2,7 @@ import * as React from 'react';
 
 import type { OrdersLocation, OrdersWarehouse } from './types';
 import { formatWarehouseLocationLabel } from '../../../utils/warehouse';
+import { rememberLocationLabel } from '../../../app/utils/locationLabelRegistry';
 
 type SelectionValue = {
   warehouseId: string | null;
@@ -51,9 +52,9 @@ type WarehouseOptionGroup = {
 };
 
 const buildOptionLabel = (warehouse: OrdersWarehouse, location: OrdersLocation) => {
-  const warehouseLabel = warehouse.name ?? warehouse.code;
-  const locationLabel = location.name ?? location.description ?? location.code;
-  return formatWarehouseLocationLabel(warehouseLabel, locationLabel ?? location.code);
+  const warehouseLabel = warehouse.name ?? null;
+  const locationLabel = location.name ?? location.description ?? null;
+  return formatWarehouseLocationLabel(warehouseLabel, locationLabel);
 };
 
 const WarehouseLocationSelect: React.FC<WarehouseLocationSelectProps> = ({
@@ -104,7 +105,7 @@ const WarehouseLocationSelect: React.FC<WarehouseLocationSelectProps> = ({
           locationId: location.id,
           locationCode: location.code,
           label,
-          secondary: location.code,
+          secondary: location.description ?? location.name ?? '',
           searchText,
         };
       });
@@ -131,6 +132,21 @@ const WarehouseLocationSelect: React.FC<WarehouseLocationSelectProps> = ({
       .filter((group) => group.options.length > 0);
   }, [groups, searchTerm]);
 
+  React.useEffect(() => {
+    warehouses.forEach((warehouse) => {
+      const locations = locationsByWarehouse[warehouse.code] ?? [];
+      locations.forEach((location) => {
+        const locationLabel = location.name ?? location.description ?? '';
+        rememberLocationLabel({
+          warehouseCode: warehouse.code,
+          warehouseName: warehouse.name ?? undefined,
+          locationCode: location.code,
+          locationName: locationLabel,
+        });
+      });
+    });
+  }, [warehouses, locationsByWarehouse]);
+
   const hasAnyOptions = React.useMemo(() => groups.some((group) => group.options.length > 0), [groups]);
 
   const selectedOptionLabel = React.useMemo(() => {
@@ -147,19 +163,15 @@ const WarehouseLocationSelect: React.FC<WarehouseLocationSelectProps> = ({
     const location = locationList.find(
       (entry) => entry.id === value.locationId || entry.code === value.locationCode,
     );
-    if (!warehouse) {
-      if (value.warehouseCode && value.locationCode) {
-        return formatWarehouseLocationLabel(value.warehouseCode, value.locationCode);
-      }
-      return '';
+    const warehouseName = warehouse?.name ?? null;
+    const locationName = location?.name ?? location?.description ?? null;
+    if (warehouse && location) {
+      return buildOptionLabel(warehouse, location);
     }
-    if (!location) {
-      if (value.locationCode) {
-        return formatWarehouseLocationLabel(warehouse.name ?? warehouse.code, value.locationCode);
-      }
-      return '';
-    }
-    return buildOptionLabel(warehouse, location);
+    const fallbackWarehouseName = warehouseName ?? (value.warehouseCode ? '등록되지 않은 창고' : null);
+    const fallbackLocationName =
+      locationName ?? (value.locationCode ? '등록되지 않은 상세위치' : null);
+    return formatWarehouseLocationLabel(fallbackWarehouseName, fallbackLocationName);
   }, [selectedLabel, value, warehouses, locationsByWarehouse]);
 
   React.useEffect(() => {

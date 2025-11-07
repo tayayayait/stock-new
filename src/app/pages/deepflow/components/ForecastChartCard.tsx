@@ -1,33 +1,29 @@
 import * as React from 'react';
 import { motion } from 'framer-motion';
-import ForecastChart, {
-  type ForecastChartLine,
-  type ForecastChartPoint,
-  type ForecastRange,
-} from './ForecastChart';
+import ForecastChart, { type ForecastChartPoint, type ForecastRange } from './ForecastChart';
 
 interface ForecastChartCardProps {
   sku: string | null;
   chartData: ForecastChartPoint[];
-  lines: ForecastChartLine[];
   forecastRange?: ForecastRange | null;
-  colors?: string[];
   loading?: boolean;
   error?: string | null;
   children?: React.ReactNode;
   toolbar?: React.ReactNode;
+  unit?: string | null;
+  includeTodayAsForecast?: boolean;
 }
 
 const ForecastChartCard: React.FC<ForecastChartCardProps> = ({
   sku,
   chartData,
-  lines,
   forecastRange,
-  colors,
   loading = false,
   error = null,
   toolbar,
   children,
+  unit,
+  includeTodayAsForecast,
 }) => {
   return (
     <motion.section
@@ -37,16 +33,21 @@ const ForecastChartCard: React.FC<ForecastChartCardProps> = ({
       transition={{ duration: 0.25 }}
     >
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h3 className="font-semibold">품번: {sku ?? '선택 없음'}</h3>
-        {toolbar}
+        <div>
+          <h3 className="text-lg font-semibold text-slate-900">수요 추이 및 예측</h3>
+          <p className="mt-1 text-sm text-slate-500">
+            {sku ? `품번 ${sku}` : 'SKU를 선택해 예측 곡선을 확인하세요.'}
+          </p>
+        </div>
+        {toolbar && <div className="flex items-center gap-2">{toolbar}</div>}
       </div>
       <ForecastChart
         data={chartData}
-        lines={lines}
-        colors={colors}
         forecastRange={forecastRange ?? undefined}
         loading={loading}
         error={error}
+        unitLabel={unit ?? 'EA'}
+        includeTodayAsForecast={includeTodayAsForecast}
       />
       {children}
     </motion.section>

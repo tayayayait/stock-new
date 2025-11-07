@@ -250,6 +250,7 @@ const WarehouseTransferPanel: React.FC<WarehouseTransferPanelProps> = ({
             fromWarehouse,
             fromLocation: allocation.locationCode,
             toWarehouse,
+            occurredAt: new Date().toISOString(),
             userId: USER_ID,
           });
           completed.push(allocation);
@@ -504,7 +505,7 @@ const getWarehouseLabel = React.useCallback(
       }
       const record = warehouseLookup.get(code);
       const name = record?.name?.trim();
-      return name ? `${code} · ${name}` : code;
+      return name || '미지정 창고';
     },
     [warehouseLookup],
   );

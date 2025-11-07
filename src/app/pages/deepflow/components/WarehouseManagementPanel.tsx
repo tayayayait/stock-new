@@ -12,7 +12,7 @@ import {
   updateLocation,
   updateWarehouse,
 } from '../../../../services/api';
-import { generateWarehouseCode } from '../../../../utils/warehouse';
+import { generateLocationCode, generateWarehouseCode } from '../../../../utils/warehouse';
 
 interface WarehouseManagementPanelProps {
   refreshToken: number;
@@ -275,17 +275,24 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
         const warehouse = await createWarehouse({
           code,
           name: trimmedName,
-          notes: trimmedMemo,
+          ...(trimmedMemo ? { notes: trimmedMemo } : {}),
         });
         if (!warehouse?.id) {
           throw new Error('생성된 창고 정보를 확인할 수 없습니다.');
         }
 
         if (trimmedDetailLocation) {
+          const existingCodes =
+            locationsByWarehouse[warehouse.code]?.map((location) => location.code) ?? [];
+          const locationCode = generateLocationCode(
+            warehouse.code,
+            trimmedDetailLocation,
+            existingCodes,
+          );
           await createLocation({
             warehouseCode: warehouse.code,
-            code: trimmedDetailLocation,
-            description: trimmedMemo,
+            code: locationCode,
+            description: trimmedDetailLocation,
           });
         }
 
@@ -303,7 +310,7 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
         setCreateSubmitting(false);
       }
     },
-    [createForm, createSubmitting, loadWarehouses, onRequestReload, searchQuery],
+    [createForm, createSubmitting, loadWarehouses, locationsByWarehouse, onRequestReload, searchQuery],
   );
 
   const handleManualReload = useCallback(() => {
@@ -323,8 +330,8 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
     setEditTargetRow(row);
     setEditForm({
       name: row.warehouse.name ?? '',
-      detailLocation: row.location?.code ?? '',
-      memo: row.location?.description ?? row.warehouse.notes ?? '',
+      detailLocation: row.location?.description ?? '',
+      memo: row.warehouse.notes ?? '',
     });
     setEditFormTouched(INITIAL_EDIT_TOUCHED);
     setEditSubmitError(null);
@@ -375,9 +382,8 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
 
       const nameInvalid = trimmedName === '';
       const detailInvalid = editingLocation && trimmedDetailLocation === '';
-      const memoInvalid = editingLocation && trimmedMemo === '';
 
-      if (nameInvalid || detailInvalid || memoInvalid) {
+      if (nameInvalid || detailInvalid) {
         return;
       }
 
@@ -389,7 +395,7 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
       try {
         await updateWarehouse(editTargetRow.warehouse.code, {
           name: trimmedName,
-          ...(editingLocation ? {} : { notes: trimmedMemo }),
+          notes: trimmedMemo ? trimmedMemo : null,
         });
       } catch (error) {
         const message =
@@ -404,8 +410,8 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
         try {
           await updateLocation(editTargetRow.location.code, {
             warehouseCode: editTargetRow.warehouse.code,
-            code: trimmedDetailLocation,
-            description: trimmedMemo,
+            code: editTargetRow.location.code,
+            description: trimmedDetailLocation,
           });
         } catch (error) {
           const message =
@@ -492,16 +498,13 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
   const editNameError = !editForm.name.trim() && editFormTouched.name ? '창고 이름을 입력해 주세요.' : null;
   const editDetailLocationError =
     isEditingLocation && !editForm.detailLocation.trim() && editFormTouched.detailLocation
-      ? '상세 위치 코드를 입력해 주세요.'
+      ? '상세 위치를 입력해 주세요.'
       : null;
-  const editMemoError =
-    isEditingLocation && !editForm.memo.trim() && editFormTouched.memo
-      ? '메모를 입력해 주세요.'
-      : null;
+  const editMemoError = null;
   const canSubmitEditForm =
     Boolean(editTargetRow) &&
     editForm.name.trim() !== '' &&
-    (!isEditingLocation || (editForm.detailLocation.trim() !== '' && editForm.memo.trim() !== '')) &&
+    (!isEditingLocation || editForm.detailLocation.trim() !== '') &&
     !editSubmitting;
 
   return (
@@ -599,9 +602,9 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
                 </thead>
                 <tbody className="divide-y divide-slate-100/80 bg-white/60 text-slate-600">
                   {tableRows.map((row) => {
-                    const locationMemo = row.location?.description?.trim();
+                    const locationDescription = row.location?.description?.trim();
+                    const locationCode = row.location?.code?.trim();
                     const warehouseMemo = row.warehouse.notes?.trim();
-                    const memoText = row.location ? locationMemo || warehouseMemo : warehouseMemo;
 
                     return (
                       <tr key={row.id}>
@@ -610,16 +613,21 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
                         </td>
                         <td className="px-4 py-3 align-top">
                           {row.location ? (
-                            <div className="font-mono text-sm font-semibold uppercase text-slate-600">
-                              {row.location.code}
+                            <div className="space-y-1">
+                              <div className="text-sm font-medium text-slate-700">
+                                {locationDescription || '설명이 등록되지 않았습니다.'}
+                              </div>
+                              {locationCode && (
+                                <div className="text-xs font-mono uppercase text-slate-400">코드: {locationCode}</div>
+                              )}
                             </div>
                           ) : (
                             <span className="text-xs text-slate-400">등록된 위치가 없습니다.</span>
                           )}
                         </td>
                         <td className="px-4 py-3 align-top text-slate-500">
-                          {memoText ? (
-                            <span className="whitespace-pre-line text-sm text-slate-600">{memoText}</span>
+                          {warehouseMemo ? (
+                            <span className="whitespace-pre-line text-sm text-slate-600">{warehouseMemo}</span>
                           ) : (
                             <span className="text-xs text-slate-400">—</span>
                           )}
@@ -749,26 +757,33 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
                 {editNameError && <span className="text-xs text-rose-500">{editNameError}</span>}
               </label>
               <label className="flex flex-col gap-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">상세위치</span>
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  상세위치 설명
+                </span>
                 <input
                   type="text"
                   value={editForm.detailLocation}
                   onChange={(event) => handleEditFormChange('detailLocation', event.target.value)}
                   onBlur={() => handleEditFormBlur('detailLocation')}
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 shadow-sm transition focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:bg-slate-100"
-                  placeholder={isEditingLocation ? '예: 랙 A1' : '상세 위치가 없습니다.'}
+                  placeholder={isEditingLocation ? '예: 상온 A1 랙 존' : '상세 위치가 없습니다.'}
                   disabled={!isEditingLocation}
                 />
                 {editDetailLocationError && <span className="text-xs text-rose-500">{editDetailLocationError}</span>}
+                {isEditingLocation && editTargetRow.location && (
+                  <span className="text-xs text-slate-400">
+                    현재 코드: <span className="font-mono uppercase">{editTargetRow.location.code}</span>
+                  </span>
+                )}
               </label>
               <label className="flex flex-col gap-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">메모</span>
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">창고 메모</span>
                 <textarea
                   value={editForm.memo}
                   onChange={(event) => handleEditFormChange('memo', event.target.value)}
                   onBlur={() => handleEditFormBlur('memo')}
                   className="h-24 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 shadow-sm transition focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
-                  placeholder={isEditingLocation ? '상세 위치 설명을 입력하세요.' : '창고 비고를 입력하세요.'}
+                  placeholder="창고 비고를 입력하세요."
                 />
                 {editMemoError && <span className="text-xs text-rose-500">{editMemoError}</span>}
               </label>
@@ -812,7 +827,7 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
               </button>
             </div>
             <form className="space-y-5 px-5 py-6 text-sm text-slate-700" onSubmit={handleCreateWarehouseWithLocation}>
-              <p className="text-slate-500">창고 기본 정보와 필요한 상세 위치 메모를 입력하세요.</p>
+              <p className="text-slate-500">창고 기본 정보와 필요한 상세 위치 설명/메모를 입력하세요.</p>
               <label className="flex flex-col gap-2">
                 <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">창고명</span>
                 <input
@@ -827,24 +842,26 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
                 {nameError && <span className="text-xs text-rose-500">{nameError}</span>}
               </label>
               <label className="flex flex-col gap-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">상세위치 (선택)</span>
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  상세위치 설명 (선택)
+                </span>
                 <input
                   type="text"
                   value={createForm.detailLocation}
                   onChange={(event) => handleCreateFormChange('detailLocation', event.target.value)}
                   onBlur={() => handleCreateFormBlur('detailLocation')}
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 shadow-sm transition focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
-                  placeholder="예: 랙 A1"
+                  placeholder="예: 상온 A1 랙 존"
                 />
               </label>
               <label className="flex flex-col gap-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">메모 (선택)</span>
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">창고 메모 (선택)</span>
                 <textarea
                   value={createForm.memo}
                   onChange={(event) => handleCreateFormChange('memo', event.target.value)}
                   onBlur={() => handleCreateFormBlur('memo')}
                   className="h-24 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 shadow-sm transition focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1"
-                  placeholder="상세 위치 설명이나 비고를 입력하세요"
+                  placeholder="창고에 대한 비고를 입력하세요"
                 />
               </label>
               {createSubmitError && (

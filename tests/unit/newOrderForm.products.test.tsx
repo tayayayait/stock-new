@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import React from 'react';
@@ -9,6 +9,16 @@ import type { Warehouse, Location } from '@/src/services/wh';
 import { createEmptyProduct } from '@/src/domains/products';
 
 const showToastMock = vi.fn();
+const FIXED_NOW = new Date('2025-06-10T00:00:00.000Z');
+let dateNowSpy: ReturnType<typeof vi.spyOn> | null = null;
+
+beforeAll(() => {
+  dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => FIXED_NOW.getTime());
+});
+
+afterAll(() => {
+  dateNowSpy?.mockRestore();
+});
 
 vi.mock('@/src/components/Toaster', async () => {
   const actual = await vi.importActual<typeof import('@/src/components/Toaster')>(
@@ -359,7 +369,7 @@ describe('NewOrderForm submission feedback', () => {
   const fillValidForm = async (kind: 'purchase' | 'sales') => {
     const scheduledAtLabel = kind === 'purchase' ? '입고일' : '출고일';
     const scheduledAtInput = screen.getByLabelText(scheduledAtLabel) as HTMLInputElement;
-    fireEvent.change(scheduledAtInput, { target: { value: '2024-01-01' } });
+    fireEvent.change(scheduledAtInput, { target: { value: '2025-06-10T10:00' } });
 
     const productSelect = await screen.findByLabelText('상품');
     const user = userEvent.setup();

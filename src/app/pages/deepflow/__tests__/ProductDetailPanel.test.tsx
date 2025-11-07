@@ -7,9 +7,21 @@ import ProductDetailPanel from '../components/ProductDetailPanel';
 import { createEmptyProduct } from '../../../../domains/products';
 
 const listMovementsMock = vi.hoisted(() => vi.fn());
+const fetchWarehousesMock = vi.hoisted(() => vi.fn());
+const fetchLocationsMock = vi.hoisted(() => vi.fn());
+const listPartnersMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../../services/movements', () => ({
   listMovements: listMovementsMock,
+}));
+
+vi.mock('../../../../services/api', () => ({
+  fetchWarehouses: fetchWarehousesMock,
+  fetchLocations: fetchLocationsMock,
+}));
+
+vi.mock('../../../../services/orders', () => ({
+  listPartners: listPartnersMock,
 }));
 
 const buildProduct = () => {
@@ -38,6 +50,9 @@ const buildProduct = () => {
 describe('ProductDetailPanel', () => {
   beforeEach(() => {
     listMovementsMock.mockReset();
+    fetchWarehousesMock.mockReset();
+    fetchLocationsMock.mockReset();
+    listPartnersMock.mockReset();
   });
 
   it('renders total inventory summary and latest receipt/issue details', async () => {
@@ -94,6 +109,31 @@ describe('ProductDetailPanel', () => {
       ],
     });
 
+    fetchWarehousesMock.mockResolvedValue({
+      items: [
+        {
+          code: 'WH-01',
+          name: '서울 1센터',
+        },
+      ],
+    });
+
+    fetchLocationsMock.mockImplementation(async (warehouseCode) => {
+      if (warehouseCode === 'WH-01') {
+        return {
+          items: [
+            { code: 'LOC-01', warehouseCode: 'WH-01', description: '상온 랙 1열' },
+            { code: 'LOC-02', warehouseCode: 'WH-01', description: '상온 랙 2열' },
+          ],
+        };
+      }
+      return { items: [] };
+    });
+
+    listPartnersMock.mockResolvedValue([
+      { id: 'ACME', name: '에이씨미 상사' },
+    ]);
+
     render(<ProductDetailPanel product={product} />);
 
     expect(screen.getByText('재고 요약')).toBeInTheDocument();
@@ -109,7 +149,10 @@ describe('ProductDetailPanel', () => {
     expect(screen.getByText('20 EA')).toBeInTheDocument();
     expect(screen.getByText('+30 EA')).toBeInTheDocument();
     expect(screen.getByText('-10 EA')).toBeInTheDocument();
-    expect(screen.getByText('거래처 ACME')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('에이씨미 상사')).toBeInTheDocument();
+    });
     expect(screen.getByText('거래처 정보 없음')).toBeInTheDocument();
+    expect(screen.getByText('서울 1센터 > 상온 랙 1열')).toBeInTheDocument();
   });
 });
