@@ -99,6 +99,8 @@ interface ForecastPageProps {
   policyBySku: ReadonlyMap<string, PolicyRow>;
 }
 
+type RiskFilterValue = InventoryRisk | 'all';
+
 export interface PolicyRow extends PolicyDraft {}
 
 const POLICY_STORAGE_KEY = 'stock-console:policy-drafts';
@@ -644,6 +646,84 @@ const STANDARD_COVERAGE_DAYS = 30;
 const SAFETY_COVERAGE_DAYS = 12;
 
 const availableStock = (row: Product): number => Math.max(row.onHand - row.reserved, 0);
+
+interface AggregatedForecastKpis {
+  totalOutbound: number;
+  averageDailyDemand: number;
+  totalStock: number;
+  coverageDays: number | null;
+  skuCount: number;
+}
+
+interface AggregateForecastKpiOptions {
+  skus: Product[];
+  forecastCache: Record<string, ForecastResponse>;
+  seriesMap: Record<string, ForecastSeriesPoint[]>;
+  promoExclude: boolean;
+}
+
+const aggregateForecastKpis = ({
+  skus,
+  forecastCache,
+  seriesMap,
+  promoExclude,
+}: AggregateForecastKpiOptions): AggregatedForecastKpis => {
+  if (!Array.isArray(skus) || skus.length === 0) {
+    return { totalOutbound: 0, averageDailyDemand: 0, totalStock: 0, coverageDays: null, skuCount: 0 };
+  }
+
+  let totalOutbound = 0;
+  let totalDailyDemand = 0;
+  let totalStock = 0;
+  let totalAvailable = 0;
+  let counted = 0;
+
+  skus.forEach((product) => {
+    const normalized = normalizeSku(product.sku);
+    const cacheEntry = forecastCache[product.sku] ?? forecastCache[normalized];
+    const series = seriesMap[product.sku] ?? seriesMap[normalized] ?? [];
+    const metrics = cacheEntry?.metrics ?? buildFallbackMetrics(product, series);
+    if (!metrics) {
+      return;
+    }
+
+    const outboundReasons = metrics.outboundReasons ?? {};
+    const promoOutbound = Object.entries(outboundReasons).reduce((sum, [label, value]) => {
+      if (!Number.isFinite(value)) {
+        return sum;
+      }
+      return label.includes('프로모션') ? sum + Math.max(value, 0) : sum;
+    }, 0);
+    const outboundTotal = Math.max(metrics.outboundTotal ?? 0, 0);
+    const adjustedOutbound = promoExclude ? Math.max(outboundTotal - promoOutbound, 0) : outboundTotal;
+
+    const baseAvgDaily = Math.max(metrics.avgDailyDemand ?? 0, 0);
+    const adjustedAvgDaily =
+      promoExclude && outboundTotal > 0
+        ? Math.max(Math.round((baseAvgDaily * adjustedOutbound) / Math.max(outboundTotal, 1)), 0)
+        : baseAvgDaily;
+
+    const currentStock = Math.max(metrics.currentTotalStock ?? product.onHand ?? 0, 0);
+    const available = availableStock(product);
+
+    totalOutbound += adjustedOutbound;
+    totalDailyDemand += adjustedAvgDaily;
+    totalStock += currentStock;
+    totalAvailable += available;
+    counted += 1;
+  });
+
+  const averageDailyDemand = counted > 0 ? totalDailyDemand / counted : 0;
+  const coverageDays = totalDailyDemand > 0 ? totalAvailable / totalDailyDemand : null;
+
+  return {
+    totalOutbound: Math.round(totalOutbound),
+    averageDailyDemand: Math.round(averageDailyDemand),
+    totalStock: Math.round(totalStock),
+    coverageDays: coverageDays !== null ? Math.round(coverageDays) : null,
+    skuCount: counted,
+  };
+};
 
 const pickPositiveNumber = (...candidates: Array<number | null | undefined>): number => {
   for (const candidate of candidates) {
@@ -3662,19 +3742,44 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
   const [selectedSku, setSelectedSku] = useState<string | null>(skus[0]?.sku ?? null);
   const [chartWindowMonths, setChartWindowMonths] = useState<ChartWindowMonths>(12);
   const [insightsState, setInsightsState] = useState<Record<string, InsightStateEntry>>({});
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
+  const [riskFilter, setRiskFilter] = useState<RiskFilterValue>('all');
+
+  const categoryOptions = useMemo(() => {
+    const set = new Set<string>();
+    skus.forEach((product) => {
+      const label = product.category?.trim();
+      if (label) {
+        set.add(label);
+      }
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [skus]);
+
+  const filteredSkus = useMemo(() => {
+    return skus.filter((product) => {
+      if (categoryFilter !== 'all' && product.category !== categoryFilter) {
+        return false;
+      }
+      if (riskFilter !== 'all' && product.risk !== riskFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [skus, categoryFilter, riskFilter]);
 
   useEffect(() => {
-    if (skus.length === 0) {
+    if (filteredSkus.length === 0) {
       if (selectedSku !== null) {
         setSelectedSku(null);
       }
       return;
     }
 
-    if (!selectedSku || !skus.some((row) => row.sku === selectedSku)) {
-      setSelectedSku(skus[0].sku);
+    if (!selectedSku || !filteredSkus.some((row) => row.sku === selectedSku)) {
+      setSelectedSku(filteredSkus[0].sku);
     }
-  }, [skus, selectedSku]);
+  }, [filteredSkus, selectedSku]);
 
   const { seriesMap, forecastIndexMap } = useMemo(() => {
     const map: Record<string, ForecastSeriesPoint[]> = {};
@@ -3712,9 +3817,23 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
     return { seriesMap: map, forecastIndexMap: indexMap };
   }, [forecastCache, promoExclude, skus]);
 
+  const aggregatedKpis = useMemo(
+    () =>
+      aggregateForecastKpis({
+        skus: filteredSkus,
+        forecastCache,
+        seriesMap,
+        promoExclude,
+      }),
+    [filteredSkus, forecastCache, promoExclude, seriesMap],
+  );
+
   const anchorSku = useMemo(() => {
-    return selectedSku ?? skus[0]?.sku ?? null;
-  }, [selectedSku, skus]);
+    if (selectedSku && filteredSkus.some((row) => row.sku === selectedSku)) {
+      return selectedSku;
+    }
+    return filteredSkus[0]?.sku ?? null;
+  }, [filteredSkus, selectedSku]);
 
   const anchorSeries = anchorSku ? seriesMap[anchorSku] ?? [] : [];
   const anchorForecastIndex = anchorSku
@@ -3766,7 +3885,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
       sku ? seriesMap[sku] ?? [] : [];
 
     if (mode === 'overall') {
-      const targetSku = anchorSku ?? skus[0]?.sku ?? null;
+      const targetSku = anchorSku ?? filteredSkus[0]?.sku ?? null;
       if (!targetSku) {
         return { chartData: [], visibleSeries: [] };
       }
@@ -3780,7 +3899,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
       return { chartData: toChartData(effective), visibleSeries: effective };
     }
 
-    const targetSku = selectedSku ?? anchorSku ?? skus[0]?.sku ?? null;
+    const targetSku = selectedSku ?? anchorSku ?? filteredSkus[0]?.sku ?? null;
     if (!targetSku) {
       return { chartData: [], visibleSeries: [] };
     }
@@ -3794,7 +3913,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
         : targetSeries.slice(-Math.max(fallbackCount, Math.min(6, targetSeries.length)));
 
     return { chartData: toChartData(effective), visibleSeries: effective };
-  }, [anchorSku, chartWindowMonths, mode, selectedSku, seriesMap, skus]);
+  }, [anchorSku, chartWindowMonths, filteredSkus, mode, selectedSku, seriesMap]);
 
   const adjustedForecastRange = useMemo(
     () => adjustForecastRange(forecastRange, chartData),
@@ -3812,8 +3931,8 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
     if (!anchorSku) {
       return null;
     }
-    return skus.find((row) => row.sku === anchorSku) ?? null;
-  }, [anchorSku, skus]);
+    return filteredSkus.find((row) => row.sku === anchorSku) ?? null;
+  }, [anchorSku, filteredSkus]);
 
   const resolvedMetrics = useMemo<ForecastMetrics | null>(() => {
     if (anchorForecast?.metrics) {
@@ -4005,6 +4124,98 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
   return (
     <div className="p-6 grid grid-cols-12 gap-6">
       <Card className="col-span-12">
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900">예측 KPI 요약</h2>
+              <p className="mt-1 text-xs text-slate-500">
+                선택된 조건에 따라 총 {aggregatedKpis.skuCount.toLocaleString()}개 SKU를 집계했습니다.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <label className="flex items-center gap-2">
+                <span className="text-slate-500">기간</span>
+                <select
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                  value={chartWindowMonths}
+                  onChange={(event) => setChartWindowMonths(Number(event.target.value) as ChartWindowMonths)}
+                >
+                  {CHART_WINDOW_OPTIONS.map((option) => (
+                    <option key={option.months} value={option.months}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-2">
+                <span className="text-slate-500">카테고리</span>
+                <select
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                  value={categoryFilter}
+                  onChange={(event) => setCategoryFilter(event.target.value)}
+                >
+                  <option value="all">전체</option>
+                  {categoryOptions.map((category) => (
+                    <option key={category} value={category}>
+                      {category}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-2">
+                <span className="text-slate-500">위험도</span>
+                <select
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                  value={riskFilter}
+                  onChange={(event) => setRiskFilter(event.target.value as RiskFilterValue)}
+                >
+                  <option value="all">전체</option>
+                  {RISK_ORDER.map((risk) => (
+                    <option key={risk} value={risk}>
+                      {risk}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={promoExclude}
+                  onChange={(event) => setPromoExclude(event.target.checked)}
+                />
+                <span>프로모션 제외</span>
+              </label>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <p className="text-xs text-slate-500">총 출고</p>
+              <p className="mt-1 text-lg font-semibold text-slate-900">
+                {aggregatedKpis.totalOutbound.toLocaleString()} <span className="ml-1 text-xs font-normal text-slate-500">EA</span>
+              </p>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <p className="text-xs text-slate-500">평균 일수요</p>
+              <p className="mt-1 text-lg font-semibold text-slate-900">
+                {aggregatedKpis.averageDailyDemand.toLocaleString()} <span className="ml-1 text-xs font-normal text-slate-500">EA</span>
+              </p>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <p className="text-xs text-slate-500">현재 재고</p>
+              <p className="mt-1 text-lg font-semibold text-slate-900">
+                {aggregatedKpis.totalStock.toLocaleString()} <span className="ml-1 text-xs font-normal text-slate-500">EA</span>
+              </p>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <p className="text-xs text-slate-500">재고 커버리지</p>
+              <p className="mt-1 text-lg font-semibold text-slate-900">
+                {aggregatedKpis.coverageDays !== null ? `${aggregatedKpis.coverageDays.toLocaleString()}일` : '—'}
+              </p>
+            </div>
+          </div>
+        </div>
+      </Card>
+      <Card className="col-span-12">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <h2 className="font-semibold text-lg">수요예측</h2>
           <div className="text-xs flex flex-wrap items-center justify-end gap-1">
@@ -4020,14 +4231,6 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
             >
               전체
             </button>
-            <label className="inline-flex items-center gap-2 ml-4">
-              <input
-                type="checkbox"
-                checked={promoExclude}
-                onChange={(event) => setPromoExclude(event.target.checked)}
-              />
-              <span>프로모션 기간 제외</span>
-            </label>
           </div>
         </div>
         <div className="max-h-[260px] overflow-auto rounded-2xl border border-slate-200 bg-white">
@@ -4048,7 +4251,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
               </tr>
             </thead>
             <tbody>
-              {skus.map((row) => {
+              {filteredSkus.map((row) => {
                 const isSelected = selectedSku === row.sku;
                 const normalizedSku = normalizeSku(row.sku);
                 const forecastEntry = forecastCache[row.sku] ?? forecastCache[normalizedSku] ?? null;
