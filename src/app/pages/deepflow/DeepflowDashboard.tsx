@@ -4375,7 +4375,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
   );
 
   return (
-    <div className="p-6 grid grid-cols-12 gap-6">
+    <div className="grid grid-cols-1 gap-6 p-6 xl:grid-cols-12">
       <Card className="col-span-12">
         <div className="flex flex-col gap-4">
           <div className="flex flex-wrap items-center justify-between gap-4">
@@ -4468,7 +4468,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
           </div>
         </div>
       </Card>
-      <Card className="col-span-12">
+      <Card className="col-span-12 xl:col-span-5 xl:row-span-2">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <h2 className="font-semibold text-lg">수요예측</h2>
           <div className="text-xs flex flex-wrap items-center justify-end gap-1">
@@ -4574,6 +4574,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
       </Card>
 
       <ForecastChartCard
+        className="col-span-12 xl:col-span-7"
         sku={anchorSku}
         chartData={chartData}
         forecastRange={adjustedForecastRange}
@@ -4581,7 +4582,9 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
         error={anchorError}
         toolbar={chartToolbar}
         unit={activeProduct?.unit ?? 'EA'}
-      >
+      />
+
+      <Card className="col-span-12 xl:col-span-7 flex flex-col xl:min-h-[420px]">
         <ForecastInsightsSection
           sku={anchorSku}
           productName={activeProduct?.name}
@@ -4593,8 +4596,9 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
           insightLoading={insightLoading}
           insightError={insightErrorMessage ?? anchorError ?? null}
           insightNotice={insightNotice}
+          className="flex-1 xl:overflow-y-auto"
         />
-      </ForecastChartCard>
+      </Card>
 
     </div>
   );

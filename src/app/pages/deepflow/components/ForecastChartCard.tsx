@@ -12,6 +12,7 @@ interface ForecastChartCardProps {
   toolbar?: React.ReactNode;
   unit?: string | null;
   includeTodayAsForecast?: boolean;
+  className?: string;
 }
 
 const ForecastChartCard: React.FC<ForecastChartCardProps> = ({
@@ -24,10 +25,11 @@ const ForecastChartCard: React.FC<ForecastChartCardProps> = ({
   children,
   unit,
   includeTodayAsForecast,
+  className = '',
 }) => {
   return (
     <motion.section
-      className="col-span-12 rounded-3xl border border-white/70 bg-white/60 p-5 shadow-lg backdrop-blur-sm"
+      className={`col-span-12 rounded-3xl border border-white/70 bg-white/60 p-5 shadow-lg backdrop-blur-sm ${className}`}
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}

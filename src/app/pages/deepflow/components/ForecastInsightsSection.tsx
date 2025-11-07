@@ -15,6 +15,7 @@ interface ForecastInsightsSectionProps {
   insightLoading?: boolean;
   insightError?: string | null;
   insightNotice?: string | null;
+  className?: string;
 }
 
 const ForecastInsightsSection: React.FC<ForecastInsightsSectionProps> = ({
@@ -28,11 +29,14 @@ const ForecastInsightsSection: React.FC<ForecastInsightsSectionProps> = ({
   insightLoading = false,
   insightError = null,
   insightNotice = null,
+  className = '',
 }) => {
   const aggregatedLoading = loading || insightLoading;
 
   return (
-    <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-3">
+    <div
+      className={`grid grid-cols-1 gap-4 xl:grid-cols-3 xl:min-h-[420px] ${className}`}
+    >
       <SalesAnalysisPanel
         sku={sku}
         productName={productName}
