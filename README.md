@@ -71,6 +71,8 @@ Vite serves the dashboard at `http://localhost:5173`. When the server mode is en
 
 > `npm run dev -- --host` exposes the dev server to your local network so teammates on the **same Wi-Fi/LAN** can load it via the printed IP address. It does **not** make the site public on the wider internet; for external sharing use the GitHub Pages workflow or another hosted deployment described below. Alternatively, install [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and run `cloudflared tunnel --url http://localhost:5173` to mint a temporary public URL that proxies requests into your local dev server.
 
+> When you expose the dashboard through a Cloudflare Tunnel, set `VITE_TUNNEL=1` and `VITE_TUNNEL_HOST=<your-tunnel-domain>` in your `.env` file so that the dev client connects via the `wss://` endpoint that Cloudflare exposes. If the host is omitted, the dev server now falls back to the default HMR client (no `wss://localhost:443`), which avoids the socket errors we were seeing.
+
 ## Local mock mode quickstart
 1. Set `VITE_FEATURE_LOCAL_MODE=true` in your `.env.local` file to enable the browser mocks.
 2. Leave `VITE_API_URL` unset so requests resolve against the service worker without hitting a server.

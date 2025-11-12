@@ -331,7 +331,7 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
     setEditForm({
       name: row.warehouse.name ?? '',
       detailLocation: row.location?.description ?? '',
-      memo: row.warehouse.notes ?? '',
+      memo: row.location ? row.location.notes ?? '' : row.warehouse.notes ?? '',
     });
     setEditFormTouched(INITIAL_EDIT_TOUCHED);
     setEditSubmitError(null);
@@ -372,6 +372,27 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
       const trimmedDetailLocation = editForm.detailLocation.trim();
       const trimmedMemo = editForm.memo.trim();
       const editingLocation = Boolean(editTargetRow.location);
+      const normalizedWarehouseName = editTargetRow.warehouse.name?.trim() ?? '';
+      const normalizedWarehouseMemo = editTargetRow.warehouse.notes?.trim() ?? '';
+      const normalizedLocationDescription = editTargetRow.location?.description?.trim() ?? '';
+      const normalizedLocationMemo = editTargetRow.location?.notes?.trim() ?? '';
+      const normalizedWarehouseNotesInput = trimmedMemo ? trimmedMemo : null;
+      const warehouseNameChanged = trimmedName !== normalizedWarehouseName;
+      const warehouseMemoChanged = !editingLocation && trimmedMemo !== normalizedWarehouseMemo;
+      const locationDescriptionChanged = editingLocation && trimmedDetailLocation !== normalizedLocationDescription;
+      const locationMemoChanged = editingLocation && trimmedMemo !== normalizedLocationMemo;
+      const shouldUpdateWarehouse = warehouseNameChanged || warehouseMemoChanged;
+      const shouldUpdateLocation = editingLocation && (locationDescriptionChanged || locationMemoChanged);
+      const nextWarehouseNotes = warehouseMemoChanged
+        ? normalizedWarehouseNotesInput
+        : editTargetRow.warehouse.notes ?? null;
+      const nextLocationNotes = editingLocation
+        ? locationMemoChanged
+          ? trimmedMemo
+            ? trimmedMemo
+            : null
+          : editTargetRow.location?.notes ?? null
+        : undefined;
 
       const touched: CreateWarehouseLocationFormTouched = {
         name: true,
@@ -392,11 +413,30 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
       setWarehousesError(null);
       setLocationsError(null);
 
+      if (!shouldUpdateWarehouse && !shouldUpdateLocation) {
+        setEditDialogOpen(false);
+        setEditSubmitting(false);
+        return;
+      }
+
       try {
-        await updateWarehouse(editTargetRow.warehouse.code, {
-          name: trimmedName,
-          notes: trimmedMemo ? trimmedMemo : null,
-        });
+        if (shouldUpdateWarehouse) {
+          await updateWarehouse(editTargetRow.warehouse.code, {
+            name: trimmedName,
+            notes: nextWarehouseNotes,
+          });
+          setWarehouses((prev) =>
+            prev.map((warehouse) =>
+              warehouse.code === editTargetRow.warehouse.code
+                ? {
+                    ...warehouse,
+                    name: trimmedName,
+                    notes: nextWarehouseNotes,
+                  }
+                : warehouse,
+            ),
+          );
+        }
       } catch (error) {
         const message =
           error instanceof Error && error.message ? error.message : '창고를 수정하지 못했습니다.';
@@ -406,12 +446,32 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
         return;
       }
 
-      if (editingLocation && editTargetRow.location) {
+      if (shouldUpdateLocation && editingLocation && editTargetRow.location) {
         try {
           await updateLocation(editTargetRow.location.code, {
             warehouseCode: editTargetRow.warehouse.code,
             code: editTargetRow.location.code,
             description: trimmedDetailLocation,
+            ...(locationMemoChanged ? { notes: nextLocationNotes } : {}),
+          });
+          setLocationsByWarehouse((prev) => {
+            const current = prev[editTargetRow.warehouse.code] ?? [];
+            if (current.length === 0) {
+              return prev;
+            }
+            const nextLocations = current.map((location) =>
+              location.code === editTargetRow.location?.code
+                ? {
+                    ...location,
+                    description: trimmedDetailLocation,
+                    notes: nextLocationNotes ?? location.notes ?? null,
+                  }
+                : location,
+            );
+            return {
+              ...prev,
+              [editTargetRow.warehouse.code]: nextLocations,
+            };
           });
         } catch (error) {
           const message =
@@ -423,14 +483,10 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
         }
       }
 
-      setLocationRefreshToken((value) => value + 1);
-
-      await loadWarehouses(searchQuery);
-      onRequestReload();
       setEditDialogOpen(false);
       setEditSubmitting(false);
     },
-    [editForm, editSubmitting, editTargetRow, loadWarehouses, onRequestReload, searchQuery],
+    [editForm, editSubmitting, editTargetRow],
   );
 
   const handleDeleteRow = useCallback((row: WarehouseLocationRow) => {
@@ -604,7 +660,7 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
                   {tableRows.map((row) => {
                     const locationDescription = row.location?.description?.trim();
                     const locationCode = row.location?.code?.trim();
-                    const warehouseMemo = row.warehouse.notes?.trim();
+                    const rowMemo = row.location?.notes?.trim() ?? row.warehouse.notes?.trim();
 
                     return (
                       <tr key={row.id}>
@@ -626,8 +682,8 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
                           )}
                         </td>
                         <td className="px-4 py-3 align-top text-slate-500">
-                          {warehouseMemo ? (
-                            <span className="whitespace-pre-line text-sm text-slate-600">{warehouseMemo}</span>
+                          {rowMemo ? (
+                            <span className="whitespace-pre-line text-sm text-slate-600">{rowMemo}</span>
                           ) : (
                             <span className="text-xs text-slate-400">—</span>
                           )}
@@ -893,13 +949,3 @@ const WarehouseManagementPanel: React.FC<WarehouseManagementPanelProps> = ({ ref
 };
 
 export default WarehouseManagementPanel;
-
-
-
-
-
-
-
-
-
-

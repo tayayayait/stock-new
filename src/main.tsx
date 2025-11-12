@@ -3,6 +3,8 @@ import ReactDOM from 'react-dom/client';
 import { RouterProvider } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
+import './styles/print.css';
+
 import { router } from './app/routes';
 
 type RouterProviderFutureProps = React.ComponentProps<typeof RouterProvider> & {

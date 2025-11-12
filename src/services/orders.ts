@@ -59,6 +59,8 @@ export interface OrderFulfillmentLineEvent {
   quantity: number;
   warehouseCode: string;
   locationCode: string;
+  category?: string;
+  productName?: string;
 }
 
 export interface OrderFulfillmentEvent {
@@ -84,6 +86,7 @@ interface BaseOrder {
   warehouseCode?: string;
   detailedLocationId?: string;
   detailedLocationCode?: string;
+  isSample?: boolean;
 }
 
 export interface PurchaseOrderItem {
@@ -109,11 +112,15 @@ export interface SalesOrderItem {
   shippedQty: number;
   warehouseCode?: string;
   locationCode?: string;
+  category?: string;
+  productName?: string;
 }
 
 export interface SalesOrder extends BaseOrder {
   type: 'SALES';
   items: SalesOrderItem[];
+  isCsvImport?: boolean;
+  csvImportRef?: string;
 }
 
 export interface PurchaseOrderSummary {
@@ -172,8 +179,62 @@ export interface CreateSalesOrderInput {
 
 export interface FulfillmentInput {
   note?: string;
-  lines: Array<{ sku: string; quantity: number; warehouseCode: string; locationCode: string }>;
+  lines: Array<{
+    sku: string;
+    quantity: number;
+    warehouseCode: string;
+    locationCode: string;
+    category?: string;
+    productName?: string;
+  }>;
+  /** Optional event time; if omitted uses now */
+  occurredAt?: string;
 }
+
+const pad2 = (value: number): string => String(value).padStart(2, '0');
+const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+const buildKstMonthKey = (value: string | undefined): string | null => {
+  if (!value) {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) {
+    return null;
+  }
+  const shifted = new Date(timestamp + KST_OFFSET_MS);
+  return `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}`;
+};
+
+const buildShipmentRowKey = (row: ShipmentCsvRow): string => {
+  const normalize = (value?: string) => (value ? value.trim().toUpperCase() : '');
+  const partnerId = normalize(row.partnerId);
+  const partnerName = normalize(row.partnerName);
+  const orderRef = normalize(row.orderRef);
+  const sku = normalize(row.sku);
+  const warehouse = normalize(row.warehouseCode);
+  const location = normalize(row.locationCode);
+  return [partnerId, partnerName, orderRef, row.occurredAt, sku, String(row.quantity), warehouse, location].join('|');
+};
+
+const importedShipmentRowKeys = new Set<string>();
+const importedRowKeysByOrderId = new Map<string, string[]>();
+
+const normalizeShipmentDate = (value: string): number => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return Number.NaN;
+  }
+  const dateOnlyPattern = /^\d{4}-\d{2}-\d{2}$/;
+  if (dateOnlyPattern.test(trimmed)) {
+    const [year, month, day] = trimmed.split('-').map(Number);
+    if ([year, month, day].some((part) => Number.isNaN(part))) {
+      return Number.NaN;
+    }
+    return Date.UTC(year, month - 1, day) - KST_OFFSET_MS;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? Number.NaN : parsed;
+};
 
 const clone = <T>(value: T): T => {
   if (typeof globalThis.structuredClone === 'function') {
@@ -365,6 +426,16 @@ const partners: Partner[] = [
     isActive: true,
   },
   {
+    id: 'partner-s-cheongho',
+    type: 'SUPPLIER',
+    name: '청호유통',
+    phone: '02-345-1122',
+    email: 'info@cheongho.co.kr',
+    address: '서울특별시 구로구 디지털로 201',
+    isSample: true,
+    isActive: true,
+  },
+  {
     id: 'partner-c-1',
     type: 'CUSTOMER',
     name: '스타마켓 강남점',
@@ -399,6 +470,7 @@ const purchaseOrders: PurchaseOrder[] = [
     warehouseCode: 'WHS-SEOUL',
     detailedLocationId: "loc-101",
     detailedLocationCode: 'LOC-COLD-01',
+    isSample: true,
     items: [
       {
         orderId: 'po-20250101-001',
@@ -463,6 +535,7 @@ const purchaseOrders: PurchaseOrder[] = [
     warehouseCode: 'WHS-ICN',
     detailedLocationId: "loc-202",
     detailedLocationCode: 'LOC-PACK-01',
+    isSample: true,
     items: [
       {
         orderId: 'po-20250105-002',
@@ -496,115 +569,47 @@ const purchaseOrders: PurchaseOrder[] = [
   },
 ];
 
-const salesOrders: SalesOrder[] = [
-  {
-    id: 'so-20250103-001',
-    type: 'SALES',
-    partnerId: 'partner-c-1',
-    status: 'PARTIAL',
-    createdAt: '2025-01-03T03:10:00.000Z',
-    scheduledAt: '2025-01-05T00:00:00.000Z',
-    memo: '매장 프로모션 물량',
-    warehouseId: "wh-5",
-    warehouseCode: 'WHS-GANGSEO',
-    detailedLocationId: "loc-305",
-    detailedLocationCode: 'LOC-OUT-01',
-    items: [
-      {
-        orderId: 'so-20250103-001',
-        sku: 'SKU-JUICE-ORANGE',
-        qty: 150,
-        unit: 'EA',
-        shippedQty: 100,
-        warehouseCode: 'WHS-GANGSEO',
-        locationCode: 'LOC-OUT-01',
-      },
-      {
-        orderId: 'so-20250103-001',
-        sku: 'SKU-JUICE-APPLE',
-        qty: 120,
-        unit: 'EA',
-        shippedQty: 90,
-        warehouseCode: 'WHS-GANGSEO',
-        locationCode: 'LOC-OUT-02',
-      },
-    ],
-    events: [
-      {
-        id: 'so-20250103-001-status-open',
-        orderId: 'so-20250103-001',
-        kind: 'STATUS',
-        from: 'DRAFT',
-        to: 'OPEN',
-        occurredAt: '2025-01-03T03:10:00.000Z',
-      },
-      {
-        id: 'so-20250103-001-ship-1',
-        orderId: 'so-20250103-001',
-        kind: 'SHIP',
-        occurredAt: '2025-01-04T02:00:00.000Z',
-        note: '1차 출고',
-        lines: [
-          {
-            sku: 'SKU-JUICE-ORANGE',
-            quantity: 100,
-            warehouseCode: 'WHS-GANGSEO',
-            locationCode: 'LOC-OUT-01',
-          },
-          {
-            sku: 'SKU-JUICE-APPLE',
-            quantity: 90,
-            warehouseCode: 'WHS-GANGSEO',
-            locationCode: 'LOC-OUT-02',
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: 'so-20250107-002',
-    type: 'SALES',
-    partnerId: 'partner-c-2',
-    status: 'OPEN',
-    createdAt: '2025-01-07T07:45:00.000Z',
-    scheduledAt: '2025-01-10T00:00:00.000Z',
-    memo: '온라인몰 신규 런칭',
-    warehouseId: "wh-6",
-    warehouseCode: 'WHS-ONLINE',
-    detailedLocationId: "loc-402",
-    detailedLocationCode: 'LOC-SHIP-01',
-    items: [
-      {
-        orderId: 'so-20250107-002',
-        sku: 'SKU-SNACK-SEAWEED',
-        qty: 300,
-        unit: 'BOX',
-        shippedQty: 0,
-        warehouseCode: 'WHS-ONLINE',
-        locationCode: 'LOC-SHIP-01',
-      },
-      {
-        orderId: 'so-20250107-002',
-        sku: 'SKU-SNACK-ALMOND',
-        qty: 240,
-        unit: 'BOX',
-        shippedQty: 0,
-        warehouseCode: 'WHS-ONLINE',
-        locationCode: 'LOC-SHIP-01',
-      },
-    ],
-    events: [
-      {
-        id: 'so-20250107-002-status-open',
-        orderId: 'so-20250107-002',
-        kind: 'STATUS',
-        from: 'DRAFT',
-        to: 'OPEN',
-        occurredAt: '2025-01-07T07:45:00.000Z',
-      },
-    ],
-  },
-];
+const salesOrders: SalesOrder[] = [];
+
+const purgeSampleOrders = <T extends BaseOrder>(orders: T[]): void => {
+  for (let index = orders.length - 1; index >= 0; index -= 1) {
+    if (orders[index]?.isSample) {
+      orders.splice(index, 1);
+    }
+  }
+};
+
+const purgeSampleSalesOrders = () => {
+  purgeSampleOrders(salesOrders);
+};
+
+export interface ClearImportedShipmentsOptions {
+  months?: string[];
+}
+
+export function clearImportedSalesOrders(options?: ClearImportedShipmentsOptions) {
+  const targets = options?.months?.filter(Boolean) ?? [];
+  const monthFilter = targets.length > 0 ? new Set(targets) : null;
+
+  for (let index = salesOrders.length - 1; index >= 0; index -= 1) {
+    const order = salesOrders[index];
+    if (!order.isCsvImport) {
+      continue;
+    }
+    if (monthFilter) {
+      const monthKey = buildKstMonthKey(order.scheduledAt) ?? buildKstMonthKey(order.createdAt);
+      if (!monthKey || !monthFilter.has(monthKey)) {
+        continue;
+      }
+    }
+    const storedKeys = importedRowKeysByOrderId.get(order.id);
+    if (storedKeys) {
+      storedKeys.forEach((key) => importedShipmentRowKeys.delete(key));
+      importedRowKeysByOrderId.delete(order.id);
+    }
+    salesOrders.splice(index, 1);
+  }
+}
 
 const findPartner = (partnerId: string) => partners.find((partner) => partner.id === partnerId);
 
@@ -781,6 +786,338 @@ export async function getSalesOrder(orderId: string): Promise<SalesOrder | undef
   return order ? clone(order) : undefined;
 }
 
+const stripBom = (value: string) => (value && value.charCodeAt(0) === 0xfeff ? value.slice(1) : value);
+
+/**
+ * Very small CSV parser for simple, comma-separated data without embedded commas.
+ * - Trims whitespace
+ * - Skips empty lines and comment lines starting with '#'
+ */
+function parseSimpleCsv(text: string): { headers: string[]; rows: string[][] } {
+  const normalizedLines = text
+    .split(/\r?\n/)
+    .map((line) => stripBom(line).trim())
+    .filter((line) => line && !line.startsWith('#'));
+  if (normalizedLines.length === 0) {
+    return { headers: [], rows: [] };
+  }
+  const splitLine = (line: string) => stripBom(line).split(',').map((segment) => stripBom(segment).trim());
+  const headers = splitLine(normalizedLines[0]);
+  const rows = normalizedLines.slice(1).map(splitLine);
+  return { headers, rows };
+}
+
+const normalizeHeaderName = (value: string) =>
+  stripBom(value)
+    .replace(/\s+/g, '')
+    .replace(/[()（）]/g, '')
+    .toLowerCase();
+
+const HEADER_SYNONYMS = {
+  orderRef: ['orderref', '주문참조', '주문번호'],
+  occurredAt: ['occurredat', '발생일시', '발생시간', '발생시각'],
+  partnerId: ['partnerid', '거래처id', '거래id', '거래처아이디'],
+  partnerName: ['partnername', '거래처명', '고객명', '고객사'],
+  sku: ['sku', 'sku품번', '품번'],
+  productName: ['productname', '품명', '상품명', '제품명'],
+  category: ['category', '카테고리', '대분류'],
+  quantity: ['quantity', '출고량', '출고수량', '수량'],
+  warehouseCode: ['warehousecode', '창고코드', '창고'],
+  locationCode: ['locationcode', '로케이션코드', '로케이션', '위치코드'],
+} as const;
+
+const findHeaderIndex = (headers: string[], key: keyof typeof HEADER_SYNONYMS) => {
+  const candidates = new Set(HEADER_SYNONYMS[key].map(normalizeHeaderName));
+  return headers.findIndex((header) => candidates.has(normalizeHeaderName(header)));
+};
+
+export interface ShipmentCsvRow {
+  /** Optional order reference to group multiple lines */
+  orderRef?: string;
+  /** occurredAt: ISO string or YYYY-MM-DD; bare dates assume KST midnight */
+  occurredAt: string;
+  /** partnerId or partnerName: at least one should exist */
+  partnerId?: string;
+  partnerName?: string;
+  sku: string;
+  productName?: string;
+  category?: string;
+  quantity: number;
+  warehouseCode?: string;
+  locationCode?: string;
+}
+
+export interface ImportShipmentsOptions {
+  mode?: 'append' | 'replace';
+}
+
+interface ParsedShipmentRow extends ShipmentCsvRow {
+  dedupKey: string;
+  rowNum: number;
+  monthKey: string | null;
+}
+
+export interface ImportShipmentsResult {
+  addedOrders: number;
+  addedLines: number;
+  errors: string[];
+}
+
+/**
+ * Imports simple shipment rows as Sales orders with SHIP events.
+ * This mutates the in-memory salesOrders list used by the dashboard.
+ *
+ * Supported headers (case-insensitive):
+ *  - orderRef (optional)
+ *  - occurredAt (ISO or YYYY-MM-DD)
+ *  - partnerId (optional)
+ *  - partnerName (optional; used if partnerId missing)
+ *  - sku, quantity
+ *  - warehouseCode (optional), locationCode (optional)
+ */
+export async function importShipmentsFromCsv(
+  csvText: string,
+  options?: ImportShipmentsOptions,
+): Promise<ImportShipmentsResult> {
+  const { headers, rows } = parseSimpleCsv(csvText);
+  const errors: string[] = [];
+  if (headers.length === 0) {
+    return { addedOrders: 0, addedLines: 0, errors: ['CSV 헤더가 없습니다.'] };
+  }
+
+  const idx = {
+    orderRef: findHeaderIndex(headers, 'orderRef'),
+    occurredAt: findHeaderIndex(headers, 'occurredAt'),
+    partnerId: findHeaderIndex(headers, 'partnerId'),
+    partnerName: findHeaderIndex(headers, 'partnerName'),
+    sku: findHeaderIndex(headers, 'sku'),
+    productName: findHeaderIndex(headers, 'productName'),
+    category: findHeaderIndex(headers, 'category'),
+    quantity: findHeaderIndex(headers, 'quantity'),
+    warehouseCode: findHeaderIndex(headers, 'warehouseCode'),
+    locationCode: findHeaderIndex(headers, 'locationCode'),
+  } as const;
+
+  if (idx.occurredAt === -1 || idx.sku === -1 || idx.quantity === -1) {
+    return {
+      addedOrders: 0,
+      addedLines: 0,
+      errors: ['필수 헤더(occurredAt, sku, quantity)가 누락되었습니다.'],
+    };
+  }
+
+  type GroupKey = string;
+
+  const toRow = (line: string[], rowNum: number): ShipmentCsvRow | undefined => {
+    const occurredAtRaw = line[idx.occurredAt] ?? '';
+    const ms = normalizeShipmentDate(occurredAtRaw);
+    if (Number.isNaN(ms)) {
+      errors.push(`행 ${rowNum}: occurredAt 값을 날짜로 해석할 수 없습니다.`);
+      return undefined;
+    }
+    const occurredAt = new Date(ms).toISOString();
+    const sku = (line[idx.sku] ?? '').trim();
+    if (!sku) {
+      errors.push(`행 ${rowNum}: sku가 비어 있습니다.`);
+      return undefined;
+    }
+    const productNameRaw = idx.productName >= 0 ? (line[idx.productName] ?? '').trim() : '';
+    const productName = productNameRaw || undefined;
+    const categoryRaw = idx.category >= 0 ? (line[idx.category] ?? '').trim() : '';
+    const category = categoryRaw || '기타';
+    const qtyRaw = (line[idx.quantity] ?? '').replace(/,/g, '');
+    const quantity = Number(qtyRaw);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      errors.push(`행 ${rowNum}: quantity는 양수여야 합니다.`);
+      return undefined;
+    }
+    const partnerId = idx.partnerId >= 0 ? (line[idx.partnerId] ?? '').trim() : undefined;
+    const partnerName = idx.partnerName >= 0 ? (line[idx.partnerName] ?? '').trim() : undefined;
+    const orderRef = idx.orderRef >= 0 ? (line[idx.orderRef] ?? '').trim() : undefined;
+    const warehouseCode = idx.warehouseCode >= 0 ? (line[idx.warehouseCode] ?? '').trim() : undefined;
+    const locationCode = idx.locationCode >= 0 ? (line[idx.locationCode] ?? '').trim() : undefined;
+    return {
+      orderRef,
+      occurredAt,
+      partnerId,
+      partnerName,
+      sku,
+      productName,
+      category,
+      quantity,
+      warehouseCode,
+      locationCode,
+    };
+  };
+
+  const parsedRows: ParsedShipmentRow[] = [];
+  const seenCsvRowKeys = new Set<string>();
+  rows.forEach((line, index) => {
+    const rowNum = index + 2;
+    const row = toRow(line, rowNum);
+    if (!row) {
+      return;
+    }
+    const dedupKey = buildShipmentRowKey(row);
+    if (seenCsvRowKeys.has(dedupKey)) {
+      errors.push(`행 ${rowNum}: 같은 출고 데이터가 반복되어 있어 건너뜁니다.`);
+      return;
+    }
+    seenCsvRowKeys.add(dedupKey);
+    parsedRows.push({
+      ...row,
+      rowNum,
+      dedupKey,
+      monthKey: buildKstMonthKey(row.occurredAt),
+    });
+  });
+
+  if (parsedRows.length === 0) {
+    return { addedOrders: 0, addedLines: 0, errors };
+  }
+
+  const touchedMonths = new Set<string>();
+  parsedRows.forEach((entry) => {
+    if (entry.monthKey) {
+      touchedMonths.add(entry.monthKey);
+    }
+  });
+
+  const mode = options?.mode ?? 'append';
+  if (mode === 'replace' && touchedMonths.size > 0) {
+    clearImportedSalesOrders({ months: Array.from(touchedMonths) });
+  }
+
+  const uniqueRows: ParsedShipmentRow[] = [];
+  const seenImportKeys = new Set<string>();
+  parsedRows.forEach((entry) => {
+    if (seenImportKeys.has(entry.dedupKey)) {
+      errors.push(`행 ${entry.rowNum}: 같은 출고 데이터가 반복되어 있어 건너뜁니다.`);
+      return;
+    }
+    if (importedShipmentRowKeys.has(entry.dedupKey)) {
+      errors.push(`행 ${entry.rowNum}: 이전에 업로드한 데이터와 중복되어 건너뜁니다.`);
+      return;
+    }
+    seenImportKeys.add(entry.dedupKey);
+    uniqueRows.push(entry);
+  });
+
+  if (uniqueRows.length === 0) {
+    return { addedOrders: 0, addedLines: 0, errors };
+  }
+
+  const groups = new Map<GroupKey, ParsedShipmentRow[]>();
+  uniqueRows.forEach((row) => {
+    const groupKeyBase =
+      row.orderRef?.trim() || `${row.partnerId || row.partnerName || 'unknown'}|${row.occurredAt.slice(0, 10)}`;
+    const key: GroupKey = groupKeyBase;
+    const bucket = groups.get(key) ?? [];
+    bucket.push(row);
+    groups.set(key, bucket);
+  });
+
+  if (groups.size === 0) {
+    return { addedOrders: 0, addedLines: 0, errors };
+  }
+
+  purgeSampleSalesOrders();
+
+  const findPartnerByName = (name?: string) => (name ? partners.find((p) => p.name === name) : undefined);
+  const defaultPartner = partners.find((p) => p.type === 'CUSTOMER') ?? partners[0];
+
+  let addedOrders = 0;
+  let addedLines = 0;
+
+  for (const rowsInGroup of groups.values()) {
+    if (rowsInGroup.length === 0) {
+      continue;
+    }
+    const first = rowsInGroup[0];
+    const occurredAt = first.occurredAt;
+    const partner =
+      (first.partnerId && partners.find((p) => p.id === first.partnerId)) ||
+      findPartnerByName(first.partnerName) ||
+      defaultPartner;
+
+    const orderId = generateId('so-imp');
+    const itemTotals = new Map<string, { qty: number; category?: string; productName?: string }>();
+    rowsInGroup.forEach((r) => {
+      const key = r.sku;
+      const entry = itemTotals.get(key) ?? { qty: 0, category: r.category, productName: r.productName };
+      entry.qty += r.quantity;
+      if (!entry.category && r.category) {
+        entry.category = r.category;
+      }
+      if (!entry.productName && r.productName) {
+        entry.productName = r.productName;
+      }
+      itemTotals.set(key, entry);
+    });
+
+    const items = Array.from(itemTotals.entries()).map(([sku, info]) => ({
+      orderId,
+      sku,
+      qty: info.qty,
+      unit: 'EA',
+      shippedQty: 0,
+      warehouseCode: first.warehouseCode,
+      locationCode: first.locationCode,
+      category: info.category,
+      productName: info.productName,
+    }));
+
+    const order: SalesOrder = {
+      id: orderId,
+      type: 'SALES',
+      partnerId: partner?.id ?? 'partner-c-unknown',
+      status: 'OPEN',
+      createdAt: occurredAt,
+      scheduledAt: occurredAt,
+      memo: first.orderRef ? `CSV import ${first.orderRef}` : 'CSV import',
+      warehouseId: undefined,
+      warehouseCode: first.warehouseCode,
+      detailedLocationId: undefined,
+      detailedLocationCode: first.locationCode,
+      items,
+      events: [],
+      isCsvImport: true,
+      csvImportRef: first.orderRef?.trim() || undefined,
+    };
+
+    salesOrders.unshift(order);
+
+    const fulfillmentLines = rowsInGroup.map((row) => ({
+      sku: row.sku,
+      quantity: row.quantity,
+      warehouseCode: row.warehouseCode?.trim() ?? '',
+      locationCode: row.locationCode?.trim() ?? '',
+      category: row.category,
+      productName: row.productName,
+    }));
+
+    let shipmentCreated = false;
+    try {
+      await recordSalesShipment(orderId, { lines: fulfillmentLines, occurredAt });
+      shipmentCreated = true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '알 수 없는 오류가 발생했습니다.';
+      errors.push(`주문 ${orderId}: ${message}`);
+    }
+
+    if (shipmentCreated) {
+      const orderRowKeys = rowsInGroup.map((row) => row.dedupKey);
+      importedRowKeysByOrderId.set(orderId, orderRowKeys);
+      orderRowKeys.forEach((key) => importedShipmentRowKeys.add(key));
+    }
+
+    addedOrders += 1;
+    addedLines += rowsInGroup.length;
+  }
+
+  return { addedOrders, addedLines, errors };
+}
+
 const pushStatusEvent = (
   order: PurchaseOrder | SalesOrder,
   to: OrderStatus,
@@ -837,7 +1174,7 @@ export async function recordPurchaseReceipt(orderId: string, input: FulfillmentI
 
   const appliedLines: OrderFulfillmentLineEvent[] = [];
 
-  updates.forEach(({ sku, quantity, warehouseCode, locationCode }) => {
+  updates.forEach(({ sku, quantity, warehouseCode, locationCode, category, productName }) => {
     const item = order.items.find((entry) => entry.sku === sku);
     if (!item) {
       return;
@@ -857,6 +1194,8 @@ export async function recordPurchaseReceipt(orderId: string, input: FulfillmentI
       warehouseCode: warehouseCode?.trim() || item.warehouseCode || order.warehouseCode || '',
       locationCode:
         locationCode?.trim() || item.locationCode || order.detailedLocationCode || '',
+      category,
+      productName,
     });
   });
 
@@ -898,7 +1237,7 @@ export async function recordSalesShipment(orderId: string, input: FulfillmentInp
 
   const appliedLines: OrderFulfillmentLineEvent[] = [];
 
-  updates.forEach(({ sku, quantity, warehouseCode, locationCode }) => {
+  updates.forEach(({ sku, quantity, warehouseCode, locationCode, category, productName }) => {
     const item = order.items.find((entry) => entry.sku === sku);
     if (!item) {
       return;
@@ -918,6 +1257,8 @@ export async function recordSalesShipment(orderId: string, input: FulfillmentInp
       warehouseCode: warehouseCode?.trim() || item.warehouseCode || order.warehouseCode || '',
       locationCode:
         locationCode?.trim() || item.locationCode || order.detailedLocationCode || '',
+      category: category ?? item.category,
+      productName: productName ?? item.productName,
     });
   });
 
@@ -925,11 +1266,17 @@ export async function recordSalesShipment(orderId: string, input: FulfillmentInp
     return clone(order);
   }
 
+  // Use provided occurredAt when valid, otherwise fall back to now
+  const occurredAtIso =
+    input.occurredAt && !Number.isNaN(Date.parse(input.occurredAt))
+      ? new Date(input.occurredAt).toISOString()
+      : new Date().toISOString();
+
   const event: OrderFulfillmentEvent = {
     id: `${orderId}-ship-${Date.now()}`,
     orderId,
     kind: 'SHIP',
-    occurredAt: new Date().toISOString(),
+    occurredAt: occurredAtIso,
     note: input.note,
     lines: appliedLines,
   };
@@ -1064,6 +1411,7 @@ export async function createSalesOrder(input: CreateSalesOrderInput) {
     ],
   };
 
+  purgeSampleSalesOrders();
   salesOrders.unshift(order);
   return clone(order);
 }

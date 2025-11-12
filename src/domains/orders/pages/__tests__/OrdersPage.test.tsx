@@ -534,7 +534,7 @@ describe('OrdersPage sales flow', () => {
     fireEvent.change(partnerSelect, { target: { value: 'partner-c-test' } });
 
     const dateInput = withinForm.getByLabelText(TEXT.outboundDateLabel) as HTMLInputElement;
-    fireEvent.change(dateInput, { target: { value: '2025-06-10T10:00' } });
+    fireEvent.change(dateInput, { target: { value: '2025-06-10T08:00' } });
 
     const searchInput = await withinForm.findByPlaceholderText(/SKU/);
     fireEvent.change(searchInput, { target: { value: 'apple' } });
@@ -559,7 +559,7 @@ describe('OrdersPage sales flow', () => {
 
     await waitFor(() => expect(createSalesOrderMock).toHaveBeenCalledTimes(1));
     const salesOrderPayload = createSalesOrderMock.mock.calls[0][0];
-    expect(salesOrderPayload.scheduledAt).toBe('2025-06-10T01:00:00.000Z');
+    expect(salesOrderPayload.scheduledAt).toBe('2025-06-09T23:00:00.000Z');
     await waitFor(() => expect(recordSalesShipmentMock).toHaveBeenCalledTimes(1));
     expect(recordSalesShipmentMock).toHaveBeenCalledWith(
       'so-test-1',

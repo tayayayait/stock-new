@@ -482,9 +482,7 @@ const computeProjectedStockoutDate = (available: number, avgDailyOutbound: numbe
 
   const baseline = toUtcDateOnly(new Date());
   const projected = addUtcDays(baseline, Math.max(0, Math.round(days)));
-  return new Date(
-    Date.UTC(projected.getUTCFullYear(), projected.getUTCMonth(), projected.getUTCDate()),
-  ).toISOString();
+  return formatDateKey(projected);
 };
 
 export default async function inventoryDashboardRoutes(server: FastifyInstance) {
@@ -734,10 +732,7 @@ export default async function inventoryDashboardRoutes(server: FastifyInstance) 
 
     const warehouseCode =
       typeof query.warehouseCode === 'string' && query.warehouseCode.trim() ? query.warehouseCode.trim() : null;
-
-    if (!warehouseCode) {
-      return reply.status(400).send({ error: 'warehouseCode is required' });
-    }
+    const warehouseScopeParam = warehouseCode ?? undefined;
 
     let range: AnalysisRange;
     try {
@@ -751,7 +746,7 @@ export default async function inventoryDashboardRoutes(server: FastifyInstance) 
     const movementPoints = getDailyMovementHistory({
       from: range.from,
       to: range.to,
-      warehouseCode,
+      warehouseCode: warehouseScopeParam,
     });
     const dailySeries = zeroFillDailySeries(range, movementPoints);
 
@@ -770,7 +765,7 @@ export default async function inventoryDashboardRoutes(server: FastifyInstance) 
         const skuSeriesRaw = getDailyMovementHistory({
           from: range.from,
           to: range.to,
-          warehouseCode,
+          warehouseCode: warehouseScopeParam,
           sku: product.sku,
         });
         const skuSeries = zeroFillDailySeries(range, skuSeriesRaw);

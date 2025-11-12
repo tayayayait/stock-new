@@ -12,7 +12,7 @@ import {
 const PAGE_SIZE = 30;
 
 const STATUS_LABEL: Record<SalesOrderStatus, string> = {
-  draft: '작성 중',
+  draft: '임시저장',
   confirmed: '확정',
   shipped: '출고 완료',
 };
@@ -199,7 +199,7 @@ const SalesOrdersPage: React.FC = () => {
               className="mt-1 rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-700 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100"
             >
               <option value="all">전체</option>
-              <option value="draft">작성 중</option>
+              <option value="draft">임시저장</option>
               <option value="confirmed">확정</option>
               <option value="shipped">출고 완료</option>
             </select>

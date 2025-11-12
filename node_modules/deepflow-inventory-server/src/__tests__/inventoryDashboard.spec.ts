@@ -212,6 +212,7 @@ async function main() {
     assert.equal(warehouseItemsResponse.statusCode, 200);
 
     const warehouseItemsBody = warehouseItemsResponse.json() as {
+      warehouseCode: string | null;
       items: Array<{ sku: string }>;
       movementSeries: Array<unknown>;
     };
@@ -220,6 +221,22 @@ async function main() {
     assert.ok(
       warehouseItemsBody.items.some((item) => item.sku === 'SKU-COFFEE'),
       'warehouse items should include the seeded SKU',
+    );
+    assert.equal(warehouseItemsBody.warehouseCode, 'WH-SEOUL');
+
+    const globalWarehouseItemsResponse = await server.inject({
+      method: 'GET',
+      url: `/api/inventory/warehouse-items?from=${fromISO}&to=${toISO}`,
+    });
+    assert.equal(globalWarehouseItemsResponse.statusCode, 200);
+    const globalWarehouseItemsBody = globalWarehouseItemsResponse.json() as {
+      warehouseCode: string | null;
+      items: Array<{ sku: string }>;
+    };
+    assert.equal(globalWarehouseItemsBody.warehouseCode, null);
+    assert.ok(
+      globalWarehouseItemsBody.items.some((item) => item.sku === 'SKU-COFFEE'),
+      'global warehouse items should include the seeded SKU',
     );
   } finally {
     await server.close();

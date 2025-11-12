@@ -1,4 +1,4 @@
-import { get, post } from './api';
+import { get, post, put } from './api';
 
 const POLICIES_REQUEST_TIMEOUT_MS = 15000;
 
@@ -107,6 +107,12 @@ interface PolicyListResponse {
   success: boolean;
   items?: PolicyDraft[];
   message?: string;
+}
+
+interface PolicyUpsertResponse {
+  success: boolean;
+  item?: PolicyDraft;
+  error?: string;
 }
 
 export type SafetyPolicyMethod = 'bufferRatio' | 'kFactor' | 'base';
@@ -349,4 +355,24 @@ export async function savePolicies(policies: PolicyDraft[]): Promise<void> {
     const message = response.message?.trim() || '정책을 저장하지 못했습니다.';
     throw new Error(message);
   }
+}
+
+export async function upsertPolicy(policy: PolicyDraft): Promise<PolicyDraft> {
+  const response = await put<PolicyUpsertResponse>(`/api/policies/${encodeURIComponent(policy.sku)}`, {
+    ...policy,
+    name: policy.name ?? null,
+    smoothingAlpha: FIXED_SMOOTHING_ALPHA,
+    corrRho: FIXED_CORRELATION_RHO,
+  });
+
+  if (!response.success || !response.item) {
+    const message = response.error?.trim() || '정책을 저장하지 못했습니다.';
+    throw new Error(message);
+  }
+
+  return {
+    ...response.item,
+    smoothingAlpha: FIXED_SMOOTHING_ALPHA,
+    corrRho: FIXED_CORRELATION_RHO,
+  };
 }

@@ -131,6 +131,29 @@ vi.mock('../../../../services/api', () => ({
   fetchForecast: vi.fn(async () => mockForecastResponse),
   fetchWarehouses: vi.fn(async () => ({ items: [] })),
   fetchLocations: vi.fn(async () => ({ items: [] })),
+  requestForecastInsight: vi.fn(async () => ({
+    insight: {
+      summary: '테스트 요약',
+      drivers: [],
+      watchouts: [],
+      risks: [],
+      generatedAt: new Date().toISOString(),
+      source: 'fallback',
+      language: 'ko',
+      version: 'v1',
+    },
+    actionPlan: null,
+  })),
+}));
+
+const fetchLatestActionPlanMock = vi.hoisted(() => vi.fn(async () => null));
+const submitActionPlanMock = vi.hoisted(() => vi.fn(async () => null));
+const approveActionPlanMock = vi.hoisted(() => vi.fn(async () => null));
+
+vi.mock('../../../../services/actionPlans', () => ({
+  fetchLatestActionPlan: fetchLatestActionPlanMock,
+  submitActionPlan: submitActionPlanMock,
+  approveActionPlan: approveActionPlanMock,
 }));
 
 vi.mock('../../../../services/products', () => ({

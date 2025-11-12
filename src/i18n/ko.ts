@@ -301,6 +301,67 @@ export const ko = {
     title: '매입',
     comingSoon: '이 기능은 곧 제공될 예정입니다.',
   },
+  purchaseOrders: {
+    filter: {
+      title: '기간 선택',
+      label: '발주일',
+      summaryEmpty: '전체 기간',
+      presets: {
+        all: '전체 기간',
+        today: '오늘',
+        recent7Days: '최근 7일',
+        recent30Days: '최근 30일',
+        lastWeek: '지난주',
+        thisMonth: '이번 달',
+        lastMonth: '지난달',
+        recent12Months: '최근 12개월',
+      },
+      actions: {
+        open: '기간 선택',
+        clear: '필터 해제',
+      },
+      maxRangeHint: (days: number) => `최대 ${days.toLocaleString('ko-KR')}일`,
+      errors: {
+        invalidRange: '시작일과 종료일을 다시 확인해 주세요.',
+        limitExceeded: '최대 365일을 초과할 수 없습니다.',
+      },
+    },
+    tabs: {
+      labels: {
+        all: '주문 전체',
+        draft: '임시 저장',
+        awaiting: '입고 대기',
+        partial: '부분 입고',
+        received: '입고 완료',
+      },
+      empty: '선택한 탭에 해당하는 발주서가 없습니다.',
+    },
+    arrival: {
+      panelLabel: '입고 예정 알림',
+      panelDescription: '입고 D-Day와 지연 건을 한눈에 확인하고 버튼으로 목록을 띄워보세요.',
+      helper: '카운트를 누르면 해당 입고 상태만 볼 수 있어요.',
+      pendingCount: (count: number) => `${count.toLocaleString('ko-KR')}건 입고 대기 중`,
+      pendingEmpty: '입고 대기 건 없음',
+      actions: {
+        reset: '전체 보기',
+      },
+      cards: {
+        overdue: {
+          title: '지연 입고',
+          description: '발주일이 지나고도 입고되지 않음',
+        },
+        today: {
+          title: '오늘 입고',
+          description: '오늘 도착 예정',
+        },
+        next3: {
+          title: '3일 이내',
+          description: '다음 3일 안에 입고 예정',
+        },
+      },
+      empty: '선택한 필터에 해당하는 발주서가 없습니다.',
+    },
+  },
   returns: {
     title: '반품',
     comingSoon: '이 기능은 곧 제공될 예정입니다.',

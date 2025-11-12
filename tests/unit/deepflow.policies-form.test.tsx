@@ -8,13 +8,23 @@ vi.mock('@/src/services/policies', () => ({
   savePolicies: vi.fn(),
   fetchPolicies: vi.fn(),
   requestForecastRecommendation: vi.fn(),
+  upsertPolicy: vi.fn(),
+}));
+
+vi.mock('@/src/services/inventoryDashboard', () => ({
+  fetchInventoryAnalysis: vi.fn().mockRejectedValue(new Error('analysis unavailable')),
 }));
 
 import { __test__ as deepflowTestUtils } from '@/src/app/pages/deepflow/DeepflowDashboard';
 import { createEmptyProduct } from '@/src/domains/products';
 import type { PolicyRow } from '@/src/app/pages/deepflow/DeepflowDashboard';
 import type { Product } from '@/src/domains/products';
-import { savePolicies, fetchPolicies } from '@/src/services/policies';
+import {
+  savePolicies,
+  fetchPolicies,
+  upsertPolicy,
+  requestForecastRecommendation,
+} from '@/src/services/policies';
 
 const { PoliciesPage } = deepflowTestUtils;
 
@@ -203,6 +213,60 @@ describe('PoliciesPage save flow', () => {
     expect(rowsRef.current).toHaveLength(1);
     expect(rowsRef.current[0]?.sku).toBe('SKU-LOCAL');
   });
+  });
+
+  it('자동으로 추천값을 적용하고 저장한다', async () => {
+    const row: PolicyRow = {
+      sku: 'SKU-AUTO',
+      forecastDemand: 90,
+      demandStdDev: 25,
+      leadTimeDays: 11,
+      serviceLevelPercent: 95,
+    };
+
+    vi.mocked(requestForecastRecommendation).mockResolvedValue({
+      forecastDemand: 150,
+      demandStdDev: 45,
+      leadTimeDays: 14,
+      serviceLevelPercent: 97,
+      notes: [],
+      rawText: 'ok',
+    });
+
+    vi.mocked(upsertPolicy).mockResolvedValue({
+      ...row,
+      sku: 'SKU-AUTO',
+      forecastDemand: 150,
+      demandStdDev: 45,
+      leadTimeDays: 14,
+      serviceLevelPercent: 97,
+      smoothingAlpha: 0.4,
+      corrRho: 0.25,
+    });
+
+    const { user } = renderPoliciesPage([row]);
+
+    await user.click(screen.getByRole('button', { name: '수정' }));
+    const autoButton = await screen.findByRole('button', { name: '추천값 자동산출' });
+    await user.click(autoButton);
+
+    await waitFor(() => {
+      expect(requestForecastRecommendation).toHaveBeenCalledTimes(1);
+    });
+
+    await waitFor(() => {
+      expect(upsertPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sku: 'SKU-AUTO',
+          forecastDemand: 150,
+          demandStdDev: 45,
+          leadTimeDays: 14,
+          serviceLevelPercent: 97,
+        }),
+      );
+    });
+
+    expect(await screen.findByDisplayValue('150')).toBeInTheDocument();
   });
 });
 

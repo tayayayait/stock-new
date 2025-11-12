@@ -15,6 +15,10 @@ export interface MovementDraft {
   fromLocation?: string;
   toWarehouse?: string;
   toLocation?: string;
+  poId?: string;
+  poLineId?: string;
+  soId?: string;
+  soLineId?: string;
 }
 
 export interface MovementRecord extends MovementDraft {

@@ -7,9 +7,14 @@ import NewOrderForm from '@/src/domains/orders/components/NewOrderForm';
 import type { Partner } from '@/src/services/orders';
 import type { Warehouse, Location } from '@/src/services/wh';
 import { createEmptyProduct } from '@/src/domains/products';
+import { formatDateTimeLocalFromUtc } from '@/shared/datetime/kst';
 
 const showToastMock = vi.fn();
 const FIXED_NOW = new Date('2025-06-10T00:00:00.000Z');
+const toPastLocalDateTime = (minutesAgo = 60) =>
+  formatDateTimeLocalFromUtc(FIXED_NOW.getTime() - minutesAgo * 60 * 1000);
+const toFutureLocalDateTime = (minutesAhead = 60) =>
+  formatDateTimeLocalFromUtc(FIXED_NOW.getTime() + minutesAhead * 60 * 1000);
 let dateNowSpy: ReturnType<typeof vi.spyOn> | null = null;
 
 beforeAll(() => {
@@ -369,7 +374,8 @@ describe('NewOrderForm submission feedback', () => {
   const fillValidForm = async (kind: 'purchase' | 'sales') => {
     const scheduledAtLabel = kind === 'purchase' ? '입고일' : '출고일';
     const scheduledAtInput = screen.getByLabelText(scheduledAtLabel) as HTMLInputElement;
-    fireEvent.change(scheduledAtInput, { target: { value: '2025-06-10T10:00' } });
+    const safeScheduledAt = toPastLocalDateTime(120);
+    fireEvent.change(scheduledAtInput, { target: { value: safeScheduledAt } });
 
     const productSelect = await screen.findByLabelText('상품');
     const user = userEvent.setup();
@@ -381,6 +387,35 @@ describe('NewOrderForm submission feedback', () => {
 
     return user;
   };
+
+  it('prevents submission when scheduled date is in the future', async () => {
+    const onSubmit = vi.fn();
+
+    render(
+      <NewOrderForm
+        {...buildCommonProps('purchase')}
+        onSubmit={onSubmit}
+        onRequestLocations={() => {}}
+      />,
+    );
+
+    const scheduledAtInput = screen.getByLabelText('입고일');
+    const futureValue = toFutureLocalDateTime(60);
+    fireEvent.change(scheduledAtInput, { target: { value: futureValue } });
+
+    expect(
+      await screen.findByText('⚠️ 미래 시점의 입출고는 등록할 수 없습니다. 오늘 또는 과거 날짜만 선택해주세요.'),
+    ).toBeInTheDocument();
+
+    const submitButton = screen.getByRole('button', { name: '저장' });
+    const user = userEvent.setup();
+    await user.click(submitButton);
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(
+      screen.getByText('미래 시점의 입출고는 등록할 수 없습니다.'),
+    ).toBeInTheDocument();
+  });
 
   it('shows an error toast when purchase order submission fails due to network issues', async () => {
     const networkError = Object.assign(new Error('네트워크 오류'), { status: 0, name: 'HttpError' });

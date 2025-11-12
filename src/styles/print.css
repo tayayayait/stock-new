@@ -1,0 +1,75 @@
+@page {
+  size: A4 portrait;
+  margin: 10mm 12mm;
+}
+
+/* Important: only hide the print document on screens.
+   If this rule is applied globally (all media), and the
+   @media print override fails to load for any reason,
+   the print preview ends up blank. */
+@media screen {
+  .print-document {
+    display: none;
+  }
+}
+
+@media print {
+  :root {
+    color: #0f172a;
+    font-family: 'Pretendard', 'Noto Sans KR', 'Inter', system-ui, sans-serif;
+  }
+
+  body {
+    margin: 0;
+    background: #fff;
+    color: #0f172a;
+    -webkit-print-color-adjust: exact;
+    counter-reset: page;
+  }
+
+  .print-document {
+    display: block !important; /* override any utility display */
+    width: 100%;
+    page-break-before: auto;
+    page-break-after: auto;
+  }
+
+  /* Avoid overly-broad header hiding which could remove content
+     within the printable document. Use a class instead if needed. */
+  .screen-only {
+    display: none !important;
+  }
+
+  .print-page-number::after {
+    content: counter(page);
+  }
+
+  .print-total-pages::after {
+    content: counter(pages);
+  }
+
+  .print-avoid-break {
+    page-break-inside: avoid;
+  }
+
+  .print-full-width {
+    width: 100%;
+  }
+
+  table {
+    page-break-inside: auto;
+  }
+
+  tr {
+    page-break-inside: avoid;
+    page-break-after: auto;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  tfoot {
+    display: table-row-group;
+  }
+}

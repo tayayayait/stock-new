@@ -85,6 +85,8 @@ export interface MovementDraftInput {
   fromLocation?: unknown;
   toWarehouse?: unknown;
   toLocation?: unknown;
+  poId?: unknown;
+  poLineId?: unknown;
 }
 
 export interface MovementDraftValidationOptions {
@@ -131,6 +133,8 @@ export const validateMovementDraft = (
   const toWarehouseValue = sanitizeOptionalLocation(input.toWarehouse);
   const fromLocationValue = sanitizeOptionalString(input.fromLocation, MAX_REFERENCE_LENGTH);
   const toLocationValue = sanitizeOptionalString(input.toLocation, MAX_REFERENCE_LENGTH);
+  const poIdValue = sanitizeOptionalString(input.poId, MAX_REFERENCE_LENGTH);
+  const poLineIdValue = sanitizeOptionalString(input.poLineId, MAX_REFERENCE_LENGTH);
   const partnerIdValue = sanitizeOptionalString(input.partnerId, MAX_REFERENCE_LENGTH);
   const refNoValue = sanitizeOptionalString(input.refNo, MAX_REFERENCE_LENGTH);
   const memoValue = sanitizeOptionalString(input.memo, MAX_MEMO_LENGTH);
@@ -151,6 +155,8 @@ export const validateMovementDraft = (
       fromLocation: fromLocationValue,
       toWarehouse: toWarehouseValue,
       toLocation: toLocationValue,
+      poId: poIdValue,
+      poLineId: poLineIdValue,
       partnerId: partnerIdValue,
       refNo: refNoValue,
       memo: memoValue,

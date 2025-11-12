@@ -2,7 +2,8 @@ import * as React from 'react';
 import type { ForecastExplanation, ForecastInsight, ForecastResponse } from '../../../../services/api';
 import SalesAnalysisPanel from './SalesAnalysisPanel';
 import ModelInterpretationBlock from './ModelInterpretationBlock';
-import ActionPlanCards, { type ActionPlanItem } from './ActionPlanCards';
+import ActionPlanCards from './ActionPlanCards';
+import type { ActionPlanItem, ActionPlanRecord } from '../../../../services/actionPlans';
 
 interface ForecastInsightsSectionProps {
   sku: string | null;
@@ -10,11 +11,17 @@ interface ForecastInsightsSectionProps {
   metrics: ForecastResponse['metrics'] | null;
   insight: ForecastInsight | null;
   fallbackExplanation: ForecastExplanation | null;
-  actionItems: ActionPlanItem[];
+  actionPlan: ActionPlanRecord | null;
+  fallbackActionItems: ActionPlanItem[];
   loading?: boolean;
   insightLoading?: boolean;
   insightError?: string | null;
   insightNotice?: string | null;
+  actionPlanLoading?: boolean;
+  actionPlanSubmitting?: boolean;
+  actionPlanApproving?: boolean;
+  onSubmitActionPlan?: (planId: string) => void;
+  onApproveActionPlan?: (planId: string) => void;
 }
 
 const ForecastInsightsSection: React.FC<ForecastInsightsSectionProps> = ({
@@ -23,11 +30,17 @@ const ForecastInsightsSection: React.FC<ForecastInsightsSectionProps> = ({
   metrics,
   insight,
   fallbackExplanation,
-  actionItems,
+  actionPlan,
+  fallbackActionItems,
   loading = false,
   insightLoading = false,
   insightError = null,
   insightNotice = null,
+  actionPlanLoading = false,
+  actionPlanSubmitting = false,
+  actionPlanApproving = false,
+  onSubmitActionPlan,
+  onApproveActionPlan,
 }) => {
   const aggregatedLoading = loading || insightLoading;
 
@@ -46,7 +59,15 @@ const ForecastInsightsSection: React.FC<ForecastInsightsSectionProps> = ({
         error={insightError}
         notice={insightNotice}
       />
-      <ActionPlanCards items={actionItems} loading={aggregatedLoading} />
+      <ActionPlanCards
+        plan={actionPlan}
+        fallbackItems={fallbackActionItems}
+        loading={aggregatedLoading || actionPlanLoading}
+        submitting={actionPlanSubmitting}
+        approving={actionPlanApproving}
+        onSubmit={onSubmitActionPlan}
+        onApprove={onApproveActionPlan}
+      />
     </div>
   );
 };

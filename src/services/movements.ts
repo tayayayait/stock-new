@@ -11,6 +11,7 @@ export interface MovementLocationSummary {
 
 export interface MovementSummary {
   id: string;
+  sku: string;
   occurredAt: string;
   type: MovementType;
   qty: number;
@@ -20,7 +21,12 @@ export interface MovementSummary {
 }
 
 export interface ListMovementsParams {
-  sku: string;
+  sku?: string;
+  refNo?: string;
+  partnerId?: string;
+  warehouse?: string;
+  location?: string;
+  type?: MovementType;
   limit?: number;
   offset?: number;
   signal?: AbortSignal;
@@ -119,6 +125,7 @@ const normalizeMovements = (items: ApiMovement[] = []): MovementSummary[] =>
     const occurredAt = normalizeOccurredAt(item.occurredAt ?? item.createdAt);
     return {
       id: normalizeId(item.id, `movement-${index}-${occurredAt}`),
+      sku: (item as unknown as { sku?: string }).sku ?? '',
       occurredAt,
       type: normalizeMovementType(item.type),
       qty: normalizeQty(item.qty),
@@ -129,13 +136,45 @@ const normalizeMovements = (items: ApiMovement[] = []): MovementSummary[] =>
   });
 
 export async function listMovements(params: ListMovementsParams): Promise<MovementListResult> {
-  const { sku, limit, offset, signal } = params;
-  const normalizedSku = sku.trim();
-  if (!normalizedSku) {
-    throw new Error('SKU is required to request movements.');
+  const {
+    sku,
+    refNo,
+    partnerId,
+    warehouse,
+    location,
+    type,
+    limit,
+    offset,
+    signal,
+  } = params;
+
+  const normalizedSku = typeof sku === 'string' ? sku.trim() : undefined;
+  const normalizedRefNo = typeof refNo === 'string' ? refNo.trim() : undefined;
+  const normalizedPartnerId = typeof partnerId === 'string' ? partnerId.trim() : undefined;
+  const normalizedWarehouse = typeof warehouse === 'string' ? warehouse.trim() : undefined;
+  const normalizedLocation = typeof location === 'string' ? location.trim() : undefined;
+
+  if (
+    !normalizedSku &&
+    !normalizedRefNo &&
+    !normalizedPartnerId &&
+    !normalizedWarehouse &&
+    !normalizedLocation &&
+    !type
+  ) {
+    throw new Error('최소 하나의 필터(sku, refNo, partnerId, warehouse, location, type)가 필요합니다.');
   }
 
-  const query = buildQueryString({ sku: normalizedSku, limit, offset });
+  const query = buildQueryString({
+    sku: normalizedSku,
+    refNo: normalizedRefNo,
+    partnerId: normalizedPartnerId,
+    warehouse: normalizedWarehouse,
+    location: normalizedLocation,
+    type,
+    limit,
+    offset,
+  });
   const path = `/api/movements${query}`;
 
   const response = await get<ApiMovementListResponse>(path, { signal });

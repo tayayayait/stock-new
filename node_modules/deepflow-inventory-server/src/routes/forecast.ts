@@ -21,9 +21,13 @@ import {
   calculateRecommendedOrderQuantity,
 } from '../services/reorderPoint.js';
 import { getWeeklyMovementHistory } from '../stores/movementAnalyticsStore.js';
+import { saveActionPlan } from '../stores/actionPlanStore.js';
+import type { ActionPlanItem } from '../../../shared/actionPlans/types.js';
 
 const openaiApiKey = process.env.OPENAI_API_KEY;
 const insightsClient = openaiApiKey ? new OpenAI({ apiKey: openaiApiKey }) : null;
+// Allow overriding the OpenAI chat model used for insights via env.
+const OPENAI_CHAT_MODEL = (process.env.OPENAI_CHAT_MODEL || 'gpt-5').trim();
 const DEFAULT_CORRELATION_RHO = 0.25;
 const MS_PER_DAY = 86_400_000;
 const DAYS_PER_WEEK = 7;
@@ -35,14 +39,15 @@ const WEEKLY_SEASONAL_PERIOD = 4;
 const WEEKLY_FORECAST_HORIZON = 8;
 
 const FORECAST_INSIGHT_SYSTEM_PROMPT = `당신은 한국어를 사용하는 글로벌 제조사의 수요/재고 기획 시니어 플래너입니다.
-- 제공된 JSON 데이터를 분석해 경영진에게 보고할 간결한 인사이트를 작성하세요.
-- 재고 과부족 위험, 리드타임, 프로모션 영향을 함께 고려해 현명한 조치안을 제시하세요.
-- 응답은 JSON 객체로만 작성하며 키는 summary, drivers, watchouts, recommendations, rawText 만 사용합니다.
+- 제공된 JSON 데이터를 분석해 경영진이 즉시 이해할 수 있는 통찰과 실행계획을 작성하세요.
+- 재고 과부족 위험, 리드타임, 프로모션, 시즌성, 공급제약을 함께 고려해 “Upside/Downside Risk”와 “Who/What/When/KPI” 구조를 따르세요.
+- 응답은 JSON 객체 1개로만 작성하며 다음 키를 포함합니다: summary, insights, action_items, rawText(선택), language(선택).
   - summary: 1~2문장 한국어 요약.
-  - drivers: 2~4개의 문자열 배열, 수요/재고 패턴의 핵심 근거.
-  - watchouts: 0~3개의 문자열 배열, 잠재 리스크나 모니터링 포인트.
-  - recommendations: 최대 3개의 실행 권고 배열. 각 항목은 title, description, tone(info|warning|success 중 하나), metricLabel(선택)을 포함합니다.
-  - rawText: 참조용 1문장 정도의 영어 또는 한국어 요약 (선택 사항).`;
+  - insights: 2~4개의 배열. 각 항목은 { side(up|down), driver, impact(high|medium|low), confidence(0~1), evidence }를 포함합니다.
+  - action_items: 2~4개의 배열. 각 항목은 { id, who, what, when, kpi:{ name, target, window }, rationale, confidence } 구조로 작성합니다.
+  - rawText: 선택적으로 1문장 요약 (한국어나 영어).
+  - language: 'ko' 또는 'en'. 한국어를 기본으로 사용하세요.
+- 제공되지 않은 수치는 임의로 생성하지 말고, 데이터가 부족하면 "근거 불충분"이라고 명시하세요.`;
 
 const pickJsonBlock = (content: string): string => {
   const codeBlockMatch = content.match(/```json([\s\S]*?)```/i);
@@ -54,24 +59,6 @@ const pickJsonBlock = (content: string): string => {
     return looseMatch[0];
   }
   return content;
-};
-
-const toStringArray = (value: unknown): string[] =>
-  Array.isArray(value)
-    ? value
-        .map((entry) => (typeof entry === 'string' ? entry.trim() : null))
-        .filter((entry): entry is string => Boolean(entry && entry.length > 0))
-    : [];
-
-const parseTone = (value: unknown): 'info' | 'warning' | 'success' | undefined => {
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'warning') return 'warning';
-  if (normalized === 'success') return 'success';
-  if (normalized === 'info' || normalized === 'information' || normalized === 'neutral') return 'info';
-  return undefined;
 };
 
 const isLikelyNetworkError = (error: unknown): boolean => {
@@ -313,8 +300,44 @@ const buildInsightPrompt = (context: ReturnType<typeof buildInsightContext>): st
     '```json',
     payload,
     '```',
-    '위 데이터를 분석하여 summary, drivers, watchouts, recommendations, rawText 필드를 포함한 JSON을 반환하세요.',
+    '위 데이터를 분석해 summary, insights(up/down 위험), action_items(Who/What/When/KPI) 필드를 포함한 JSON을 반환하세요.',
   ].join('\n');
+};
+
+const parseRiskSide = (value: unknown): 'upside' | 'downside' => {
+  if (typeof value !== 'string') {
+    return 'downside';
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized.startsWith('up')) {
+    return 'upside';
+  }
+  if (normalized.startsWith('down')) {
+    return 'downside';
+  }
+  return normalized === 'positive' ? 'upside' : 'downside';
+};
+
+const parseImpactLevel = (value: unknown): 'high' | 'medium' | 'low' => {
+  if (typeof value !== 'string') {
+    return 'medium';
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'high') {
+    return 'high';
+  }
+  if (normalized === 'low') {
+    return 'low';
+  }
+  return 'medium';
+};
+
+const clampConfidence = (value: unknown): number => {
+  const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : null;
+  if (!Number.isFinite(numeric)) {
+    return 0.6;
+  }
+  return Math.max(0, Math.min(Number(numeric), 1));
 };
 
 const parseInsightCompletion = (content: string) => {
@@ -327,38 +350,98 @@ const parseInsightCompletion = (content: string) => {
   const parsed = JSON.parse(jsonBlock) as Record<string, unknown>;
 
   const summary = typeof parsed.summary === 'string' ? parsed.summary.trim() : '';
-  const drivers = toStringArray(parsed.drivers);
-  const watchouts = toStringArray(parsed.watchouts);
-
-  const recommendations = Array.isArray(parsed.recommendations)
-    ? (parsed.recommendations as Array<Record<string, unknown>>)
-        .map((item, index) => {
-          const title = typeof item.title === 'string' ? item.title.trim() : '';
-          const description = typeof item.description === 'string' ? item.description.trim() : '';
-          if (!title || !description) {
-            return null;
-          }
-          const idCandidate = typeof item.id === 'string' ? item.id.trim() : '';
-          const metricLabel = typeof item.metricLabel === 'string' ? item.metricLabel.trim() : undefined;
-
-          return {
-            id: idCandidate || `rec-${index + 1}`,
-            title,
-            description,
-            tone: parseTone(item.tone),
-            metricLabel: metricLabel && metricLabel.length > 0 ? metricLabel : undefined,
-          } satisfies ParsedInsightRecommendation;
-        })
-        .filter((entry): entry is ParsedInsightRecommendation => entry !== null)
-        .slice(0, 3)
-    : [];
-
+  const language = typeof parsed.language === 'string' ? parsed.language.trim() : 'ko';
   const rawText = typeof parsed.rawText === 'string' && parsed.rawText.trim().length > 0 ? parsed.rawText.trim() : undefined;
 
-  return { summary, drivers, watchouts, recommendations, rawText };
+  const risks = Array.isArray(parsed.insights)
+    ? (parsed.insights as Array<Record<string, unknown>>)
+        .map((entry, index) => {
+          const driver = typeof entry.driver === 'string' ? entry.driver.trim() : '';
+          const evidence = typeof entry.evidence === 'string' ? entry.evidence.trim() : '';
+          if (!driver || !evidence) {
+            return null;
+          }
+          const idCandidate = typeof entry.id === 'string' ? entry.id.trim() : '';
+          return {
+            id: idCandidate || `risk-${index + 1}`,
+            side: parseRiskSide(entry.side),
+            driver,
+            evidence,
+            impact: parseImpactLevel(entry.impact),
+            confidence: clampConfidence(entry.confidence),
+          };
+        })
+        .filter((entry): entry is {
+          id: string;
+          side: 'upside' | 'downside';
+          driver: string;
+          evidence: string;
+          impact: 'high' | 'medium' | 'low';
+          confidence: number;
+        } => Boolean(entry))
+    : [];
+
+  const actionItems = Array.isArray(parsed.action_items)
+    ? (parsed.action_items as Array<Record<string, unknown>>)
+        .map((item, index): ActionPlanItem | null => {
+          const who = typeof item.who === 'string' ? item.who.trim() : '';
+          const what = typeof item.what === 'string' ? item.what.trim() : '';
+          const when = typeof item.when === 'string' ? item.when.trim() : '';
+          const rationale = typeof item.rationale === 'string' ? item.rationale.trim() : '';
+          const kpi = (item.kpi ?? {}) as Record<string, unknown>;
+          const kpiName = typeof kpi.name === 'string' ? kpi.name.trim() : '';
+          const kpiTarget =
+            typeof kpi.target === 'number' || typeof kpi.target === 'string'
+              ? (kpi.target as number | string)
+              : '';
+          const kpiWindow = typeof kpi.window === 'string' ? kpi.window.trim() : '';
+
+          if (!who || !what || !when || !kpiName || !kpiWindow) {
+            return null;
+          }
+
+          const idCandidate = typeof item.id === 'string' ? item.id.trim() : `plan-${index + 1}`;
+          return {
+            id: idCandidate,
+            who,
+            what,
+            when,
+            rationale,
+            confidence: clampConfidence(item.confidence),
+            kpi: {
+              name: kpiName,
+              target: kpiTarget,
+              window: kpiWindow,
+            },
+          };
+        })
+        .filter((entry): entry is ActionPlanItem => Boolean(entry))
+    : [];
+
+  return { summary, language, rawText, risks, actionItems };
 };
 
-const buildFallbackInsight = (product: ForecastProduct, context: ReturnType<typeof buildInsightContext>) => {
+const buildFallbackInsightBundle = (
+  product: ForecastProduct,
+  context: ReturnType<typeof buildInsightContext>,
+): {
+  insight: {
+    summary: string;
+    drivers: string[];
+    watchouts: string[];
+    risks: Array<{
+      id: string;
+      side: 'upside' | 'downside';
+      driver: string;
+      evidence: string;
+      impact: 'high' | 'medium' | 'low';
+      confidence: number;
+    }>;
+    generatedAt: string;
+    source: 'fallback';
+  };
+  actionItems: ActionPlanItem[];
+} => {
   const metrics = context.metrics as {
     windowStart?: string;
     windowEnd?: string;
@@ -406,41 +489,107 @@ const buildFallbackInsight = (product: ForecastProduct, context: ReturnType<type
     watchouts.push('가용재고가 안전재고 미만입니다. 보충 계획을 점검하세요.');
   }
 
-  const recommendations: ParsedInsightRecommendation[] = [];
+  const risks: Array<{
+    id: string;
+    side: 'upside' | 'downside';
+    driver: string;
+    evidence: string;
+    impact: 'high' | 'medium' | 'low';
+    confidence: number;
+  }> = [];
+
   if (available < safetyStockValue) {
-    recommendations.push({
-      id: 'replenish',
-      title: '재고 보충 필요',
-      description: '안전재고 이하로 내려갔습니다. 리드타임을 반영한 긴급 발주 또는 재배치를 검토하세요.',
-      tone: 'warning',
-      metricLabel: `${formatNumber(safetyStockValue - available)}개 부족`,
+    risks.push({
+      id: 'risk-stockout',
+      side: 'downside',
+      driver: '안전재고 미만',
+      evidence: `가용 ${formatNumber(available)}개 < 안전재고 ${formatNumber(safetyStockValue)}개`,
+      impact: 'high',
+      confidence: 0.78,
     });
-  } else if (safetyStockValue > 0 && available > safetyStockValue * 1.6) {
-    recommendations.push({
-      id: 'optimize',
-      title: '재고 최적화',
-      description: '안전재고 대비 여유가 크므로 판촉이나 타 창고 이동으로 재고를 최적화할 여지가 있습니다.',
-      tone: 'info',
-      metricLabel: `${formatNumber(available - safetyStockValue)}개 초과`,
-    });
-  }
-  if (Number.isFinite(metrics?.recommendedOrderQty) && (metrics?.recommendedOrderQty ?? 0) > 0) {
-    recommendations.push({
-      id: 'order-plan',
-      title: '권장 발주량 확인',
-      description: '기계 학습 모델이 산출한 권장 발주량을 검토하고, 현장 제약(중량, MOQ 등)을 반영해 확정하세요.',
-      tone: 'success',
-      metricLabel: `${formatNumber(metrics!.recommendedOrderQty ?? 0)}개 제안`,
+  } else {
+    risks.push({
+      id: 'risk-coverage',
+      side: 'upside',
+      driver: '재고 여유',
+      evidence: `가용 ${formatNumber(available)}개가 안전재고 대비 ${(available / Math.max(safetyStockValue || 1, 1)).toFixed(1)}배 수준`,
+      impact: 'medium',
+      confidence: 0.65,
     });
   }
 
+  if (typeof metrics?.projectedStockoutDate === 'string' && metrics.projectedStockoutDate) {
+    risks.push({
+      id: 'risk-stockout-date',
+      side: 'downside',
+      driver: '재고 소진 예상',
+      evidence: `예상 소진일 ${metrics.projectedStockoutDate}`,
+      impact: 'high',
+      confidence: 0.72,
+    });
+  }
+
+  const today = new Date();
+  const actionWindow = new Date(today);
+  actionWindow.setDate(today.getDate() + 7);
+  const actionWindowLabel = formatDateLabel(actionWindow.toISOString().slice(0, 10));
+
+  const actionItems: ActionPlanItem[] = [];
+  if (available < safetyStockValue) {
+    actionItems.push({
+      id: 'fallback-replenish',
+      who: '영업기획팀',
+      what: `${formatNumber(metrics?.recommendedOrderQty ?? safetyStockValue - available)}개 발주 확정`,
+      when: actionWindowLabel,
+      rationale: '안전재고 이하 구간 진입으로 긴급 보충 필요',
+      confidence: 0.75,
+      kpi: {
+        name: '서비스레벨',
+        target: '>=95%',
+        window: '향후 4주',
+      },
+    });
+  } else {
+    actionItems.push({
+      id: 'fallback-optimize',
+      who: '마케팅팀',
+      what: '과잉 재고 분산 프로모션 기획',
+      when: actionWindowLabel,
+      rationale: '안전재고 대비 재고 여유가 커서 수요 창출 필요',
+      confidence: 0.62,
+      kpi: {
+        name: 'DOS',
+        target: '<=30일',
+        window: '향후 8주',
+      },
+    });
+  }
+
+  actionItems.push({
+    id: 'fallback-check',
+    who: '공급망팀',
+    what: '리드타임 재점검 및 공급 제약 확인',
+    when: actionWindowLabel,
+    rationale: '재고 변동성을 줄이기 위해 리드타임 가정 검증',
+    confidence: 0.58,
+    kpi: {
+      name: '리드타임 편차',
+      target: '<=2일',
+      window: '분기',
+    },
+  });
+
   return {
-    summary: summaryParts.join(' '),
-    drivers,
-    watchouts,
-    recommendations,
-    generatedAt: new Date().toISOString(),
-    source: 'fallback' as const,
+    insight: {
+      summary: summaryParts.join(' '),
+      drivers,
+      watchouts,
+      risks,
+      generatedAt: new Date().toISOString(),
+      source: 'fallback',
+      version: 'v1',
+    },
+    actionItems,
   };
 };
 
@@ -747,16 +896,26 @@ export default async function forecastRoutes(server: FastifyInstance) {
     const context = buildInsightContext(product, body);
 
     if (!insightsClient) {
-      const fallback = buildFallbackInsight(product, context);
+      const fallback = buildFallbackInsightBundle(product, context);
+      const actionPlan = saveActionPlan({
+        sku: product.sku,
+        productId: product.id,
+        items: fallback.actionItems,
+        source: 'manual',
+        createdBy: 'system',
+        language: 'ko',
+        version: 'v1',
+      });
       return reply.send({
-        insight: fallback,
+        insight: { ...fallback.insight, language: 'ko', version: 'v1' },
+        actionPlan,
         error: 'LLM 분석 기능이 활성화되지 않아 기본 인사이트를 제공합니다.',
       });
     }
 
     try {
       const completion = await insightsClient.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: OPENAI_CHAT_MODEL,
         temperature: 0.25,
         messages: [
           { role: 'system', content: FORECAST_INSIGHT_SYSTEM_PROMPT },
@@ -770,26 +929,74 @@ export default async function forecastRoutes(server: FastifyInstance) {
       }
 
       const parsed = parseInsightCompletion(content);
+      const driverBullets =
+        parsed.risks.length > 0
+          ? parsed.risks.map(
+              (risk) =>
+                `${risk.side === 'downside' ? 'Downside' : 'Upside'} · ${risk.driver}: ${risk.evidence}`,
+            )
+          : [];
+      const watchouts =
+        parsed.risks.length > 0
+          ? parsed.risks
+              .filter((risk) => risk.side === 'downside')
+              .map((risk) => `${risk.driver}: ${risk.evidence}`)
+          : [];
+
       const insight = {
         summary: parsed.summary || '생성된 요약이 없습니다.',
-        drivers: parsed.drivers,
-        watchouts: parsed.watchouts,
-        recommendations: parsed.recommendations,
+        drivers: driverBullets,
+        watchouts,
+        risks: parsed.risks,
         generatedAt: new Date().toISOString(),
         source: 'llm' as const,
         rawText: parsed.rawText,
+        language: parsed.language ?? 'ko',
+        version: 'v1',
       };
 
-      return reply.send({ insight });
+      let actionItems = parsed.actionItems;
+      if (actionItems.length === 0) {
+        const fallback = buildFallbackInsightBundle(product, context);
+        actionItems = fallback.actionItems;
+      }
+
+      const actionPlan =
+        actionItems.length > 0
+          ? saveActionPlan({
+              sku: product.sku,
+              productId: product.id,
+              items: actionItems,
+              source: 'llm',
+              createdBy: 'llm-agent',
+              language: parsed.language ?? 'ko',
+              version: 'v1',
+            })
+          : null;
+
+      return reply.send({ insight, actionPlan });
     } catch (error) {
       request.log.error(error, 'Failed to generate forecast insight');
-      const fallback = buildFallbackInsight(product, context);
+      const fallback = buildFallbackInsightBundle(product, context);
+      const actionPlan = saveActionPlan({
+        sku: product.sku,
+        productId: product.id,
+        items: fallback.actionItems,
+        source: 'manual',
+        createdBy: 'system',
+        language: 'ko',
+        version: 'v1',
+      });
       const status = extractHttpStatus(error);
       const message =
         status === 401 || status === 403
           ? 'LLM 인증 정보를 확인해주세요. 기본 인사이트를 제공합니다.'
           : 'LLM 분석을 생성하지 못해 기본 인사이트를 제공합니다.';
-      return reply.send({ insight: fallback, error: message });
+      return reply.send({
+        insight: { ...fallback.insight, language: 'ko', version: 'v1' },
+        actionPlan,
+        error: message,
+      });
     }
   });
 }

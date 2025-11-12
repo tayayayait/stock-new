@@ -89,15 +89,25 @@ const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEKDAY_LABELS = ['일', '월', '화', '수', '목', '금', '토'] as const;
 
+// NOTE:
+// The initial palette was optimized for a dark background, which made the
+// chart effectively invisible on this app’s light UI (white card background).
+// Update colors to a light-theme friendly palette so axes, grid and lines are
+// clearly visible.
 const COLORS = {
-  actualLine: '#FFFFFF',
-  actualShadow: 'rgba(255,255,255,0.45)',
-  forecastLine: '#A8C7FF',
-  forecastFill: 'rgba(168,199,255,0.3)',
-  todayLine: '#888888',
-  axisText: '#E6E6E6',
-  gridLine: '#444444',
-  legendText: '#E6E6E6',
+  // Lines
+  actualLine: '#0F172A', // slate-900
+  actualShadow: 'rgba(15,23,42,0.25)',
+  forecastLine: '#3B82F6', // primary-500
+  forecastFill: 'rgba(59,130,246,0.15)',
+  todayLine: '#94A3B8', // slate-400
+
+  // Axes & grid
+  axisText: '#475569', // slate-600
+  gridLine: '#E2E8F0', // slate-200
+  legendText: '#334155', // slate-700
+
+  // Tooltip
   tooltipBackground: 'rgba(15,23,42,0.92)',
   tooltipBorder: '#1f2937',
   tooltipText: '#F8FAFC',
@@ -747,6 +757,7 @@ const ForecastChart: React.FC<ForecastChartProps> = ({
           lineStyle: {
             color: COLORS.forecastLine,
             width: 2.5,
+            type: 'dashed',
           },
           itemStyle: {
             color: COLORS.forecastLine,

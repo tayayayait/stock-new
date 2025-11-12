@@ -47,6 +47,19 @@ function validateLocationPayload(input: unknown): ValidationResult {
     }
   });
 
+  let notes: string | null | undefined;
+  if ('notes' in candidate) {
+    const raw = candidate.notes;
+    if (raw === null) {
+      notes = null;
+    } else if (typeof raw === 'string') {
+      const trimmed = raw.trim();
+      notes = trimmed === '' ? null : trimmed;
+    } else if (raw !== undefined) {
+      errors.push('notes 필드는 문자열이어야 합니다.');
+    }
+  }
+
   if (errors.length > 0) {
     return { success: false, errors };
   }
@@ -57,6 +70,7 @@ function validateLocationPayload(input: unknown): ValidationResult {
       code: normalize(candidate.code),
       warehouseCode: normalize(candidate.warehouseCode),
       description: normalize(candidate.description),
+      ...(notes !== undefined ? { notes } : {}),
     },
   };
 }

@@ -82,6 +82,7 @@ const buildInitialItem = (): OrderItemDraft => ({
 
 const LAST_SELECTION_STORAGE_KEY = 'orders:lastWarehouseSelection';
 const MINUTE_IN_MS = 60 * 1000;
+const FUTURE_SCHEDULE_ERROR = '미래 시점의 입출고는 등록할 수 없습니다.';
 
 const filterActivePartners = (partners: Partner[]) => partners.filter((partner) => partner.isActive !== false);
 
@@ -195,6 +196,7 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
   const [hideZeroWarehouseStock, setHideZeroWarehouseStock] = React.useState(false);
   const [timePickerMode, setTimePickerMode] = React.useState<DeviceUiMode>(() => detectTimePickerUiMode());
   const [salesWindow, setSalesWindow] = React.useState(() => describeKstTodayWindow());
+  const [currentKstLocal, setCurrentKstLocal] = React.useState(() => formatDateTimeLocalFromUtc(Date.now()));
   const scheduledAtHelperTextId = React.useId();
   const scheduledAtPreviewId = React.useId();
   const scheduledAtErrorId = React.useId();
@@ -242,9 +244,12 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
     if (typeof window === 'undefined') {
       return;
     }
-    const intervalId = window.setInterval(() => {
+    const updateWindows = () => {
       setSalesWindow(describeKstTodayWindow());
-    }, 60 * 1000);
+      setCurrentKstLocal(formatDateTimeLocalFromUtc(Date.now()));
+    };
+    updateWindows();
+    const intervalId = window.setInterval(updateWindows, 30 * 1000);
     return () => {
       window.clearInterval(intervalId);
     };
@@ -308,6 +313,13 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
   const [formState, setFormState] = React.useState<NewOrderFormState>(() => createInitialState());
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const hasWarehouseSelection = Boolean(formState.warehouseCode?.trim());
+  const hasLocationSelection = Boolean(formState.detailedLocationCode?.trim());
+  const activeStockScope: 'warehouse' | 'location' | null = hasWarehouseSelection
+    ? hasLocationSelection
+      ? 'location'
+      : 'warehouse'
+    : null;
   const warehouseInventoryBySku = React.useMemo(() => {
     const entries = new Map<string, { warehouseQuantity: number | null; locationQuantity: number | null }>();
     productOptions.forEach((product) => {
@@ -331,24 +343,26 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
     },
     [formState.detailedLocationCode, formState.warehouseCode, warehouseInventoryBySku],
   );
-  const hasPositiveWarehouseStock = React.useMemo(() => {
-    if (!formState.warehouseCode) {
+  const hasPositiveStockForScope = React.useMemo(() => {
+    if (!activeStockScope) {
       return true;
     }
     for (const stats of warehouseInventoryBySku.values()) {
-      if ((stats?.warehouseQuantity ?? 0) > 0) {
+      const scopedQuantity =
+        activeStockScope === 'location' ? stats?.locationQuantity ?? 0 : stats?.warehouseQuantity ?? 0;
+      if (scopedQuantity > 0) {
         return true;
       }
     }
     return false;
-  }, [formState.warehouseCode, warehouseInventoryBySku]);
+  }, [activeStockScope, warehouseInventoryBySku]);
 
 
   React.useEffect(() => {
-    if (!formState.warehouseCode && hideZeroWarehouseStock) {
+    if (!hasWarehouseSelection && hideZeroWarehouseStock) {
       setHideZeroWarehouseStock(false);
     }
-  }, [formState.warehouseCode, hideZeroWarehouseStock]);
+  }, [hasWarehouseSelection, hideZeroWarehouseStock]);
   const partnerOptions = React.useMemo(
     () => buildPartnerOptions(partners, formState.orderKind),
     [partners, formState.orderKind],
@@ -417,47 +431,59 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
 
   const clampScheduledValue = React.useCallback(
     (value: string, kind: OrderKind): string => {
-      if (kind !== 'sales' || !value) {
+      if (!value) {
         return value;
       }
       const utcMs = parseKstDateTimeLocal(value);
       if (utcMs === null) {
         return value;
       }
-      const { bounds } = salesWindow;
-      if (!bounds) {
+      const nowUtcMs = Date.now();
+      let nextUtcMs = utcMs;
+      if (nextUtcMs > nowUtcMs) {
+        nextUtcMs = nowUtcMs;
+      }
+      if (kind === 'sales') {
+        const { bounds } = salesWindow;
+        if (bounds) {
+          if (nextUtcMs < bounds.startUtcMs) {
+            nextUtcMs = bounds.startUtcMs;
+          }
+          if (nextUtcMs > bounds.endUtcMs) {
+            nextUtcMs = Math.min(nextUtcMs, bounds.endUtcMs);
+          }
+        }
+      }
+      if (nextUtcMs === utcMs) {
         return value;
       }
-      if (utcMs < bounds.startUtcMs) {
-        return formatDateTimeLocalFromUtc(bounds.startUtcMs);
-      }
-      if (utcMs > bounds.endUtcMs) {
-        return formatDateTimeLocalFromUtc(bounds.endUtcMs);
-      }
-      return value;
+      return formatDateTimeLocalFromUtc(nextUtcMs);
     },
     [salesWindow],
   );
 
   const isSalesOrder = formState.orderKind === 'sales';
   const salesBounds = isSalesOrder ? salesWindow.bounds : null;
-  const scheduleMin = salesBounds ? formatDateTimeLocalFromUtc(salesBounds.startUtcMs) : undefined;
-  const scheduleMax = salesBounds ? formatDateTimeLocalFromUtc(salesBounds.endUtcMs) : undefined;
+  const scheduleMin = salesBounds ? formatDateTimeLocalFromUtc(salesBounds.startUtcMs) || undefined : undefined;
+  const salesMaxCandidate = salesBounds ? formatDateTimeLocalFromUtc(salesBounds.endUtcMs) || undefined : undefined;
+  const nowLimit = currentKstLocal?.trim() ? currentKstLocal : undefined;
+  const scheduleMax =
+    salesMaxCandidate && nowLimit
+      ? salesMaxCandidate < nowLimit
+        ? salesMaxCandidate
+        : nowLimit
+      : salesMaxCandidate ?? nowLimit;
   const salesWindowLabel = salesWindow.label;
 
   const handleScheduledAtChange = React.useCallback(
     (value: string) => {
       setFormState((prev) => {
         const normalizedValue = value ? ensureDateTimeLocalPrecision(value) : '';
-        if (!normalizedValue) {
-          return { ...prev, scheduledAt: '' };
-        }
-        const nextValue = clampScheduledValue(normalizedValue, prev.orderKind);
-        return { ...prev, scheduledAt: nextValue };
+        return { ...prev, scheduledAt: normalizedValue };
       });
       setError(null);
     },
-    [clampScheduledValue],
+    [],
   );
 
   const adjustScheduledAtByMinutes = React.useCallback(
@@ -874,9 +900,17 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
     resolvedWarehouseRecord,
   ]);
 
+  const isFutureScheduledValue = React.useCallback((value: string): boolean => {
+    const utcMs = parseKstDateTimeLocal(value);
+    if (utcMs === null) {
+      return false;
+    }
+    return utcMs > Date.now();
+  }, []);
+
   const scheduleHelperText = React.useMemo(() => {
     const baseText =
-      '방향키·PageUp/PageDown·Enter 키로 날짜와 시간을 조정하고 Esc로 초기화할 수 있습니다. 모든 시간은 KST(UTC+9) 기준으로 입력됩니다.';
+      '방향키·PageUp/PageDown·Enter 키로 날짜와 시간을 조정하고 Esc로 초기화할 수 있습니다. 모든 시간은 KST(UTC+9) 기준으로 입력되며 현재 시점 이후의 미래 시간은 선택할 수 없습니다.';
     if (!isSalesOrder) {
       return baseText;
     }
@@ -890,11 +924,14 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
     if (parseKstDateTimeLocal(formState.scheduledAt) === null) {
       return '유효한 날짜와 시간을 입력해주세요.';
     }
+    if (isFutureScheduledValue(formState.scheduledAt)) {
+      return FUTURE_SCHEDULE_ERROR;
+    }
     if (isSalesOrder && salesBounds && !isKstDateTimeLocalWithinBounds(formState.scheduledAt, salesBounds)) {
       return `출고 주문은 ${salesWindowLabel} 범위 내에서만 선택 가능합니다.`;
     }
     return null;
-  }, [formState.scheduledAt, isSalesOrder, salesBounds, salesWindowLabel]);
+  }, [formState.scheduledAt, isFutureScheduledValue, isSalesOrder, salesBounds, salesWindowLabel]);
 
   const schedulePreviewText = React.useMemo(() => {
     if (!formState.scheduledAt) {
@@ -926,8 +963,13 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
           setError(formState.orderKind === 'purchase' ? '입고일을 선택해주세요.' : '출고일을 선택해주세요.');
           return;
         }
-        if (parseKstDateTimeLocal(formState.scheduledAt) === null) {
+        const scheduledAtUtcMs = parseKstDateTimeLocal(formState.scheduledAt);
+        if (scheduledAtUtcMs === null) {
           setError('유효한 날짜와 시간을 입력해주세요.');
+          return;
+        }
+        if (scheduledAtUtcMs > Date.now()) {
+          setError(FUTURE_SCHEDULE_ERROR);
           return;
         }
         if (
@@ -997,7 +1039,16 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
         setSubmitting(false);
       }
     },
-    [formState, onSubmit, onSubmitSuccess, partnerOptions, resetFormState, salesBounds, salesWindowLabel, showToast],
+    [
+      formState,
+      onSubmit,
+      onSubmitSuccess,
+      partnerOptions,
+      resetFormState,
+      salesBounds,
+      salesWindowLabel,
+      showToast,
+    ],
   );
 
   return (
@@ -1165,7 +1216,7 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3">
             <span className="text-xs font-semibold text-slate-500">품목</span>
-            {formState.warehouseCode ? (
+            {hasWarehouseSelection ? (
               <label className="flex cursor-pointer items-center gap-1 text-[11px] font-semibold text-slate-500">
                 <input
                   type="checkbox"
@@ -1173,7 +1224,7 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
                   checked={hideZeroWarehouseStock}
                   onChange={(event) => setHideZeroWarehouseStock(event.target.checked)}
                 />
-                해당 창고 보유품만 보기
+                {hasLocationSelection ? '해당 상세위치 보유품만 보기' : '해당 창고 보유품만 보기'}
               </label>
             ) : null}
           </div>
@@ -1182,9 +1233,11 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
           </button>
         </div>
         <div className="space-y-4">
-          {formState.warehouseCode && hideZeroWarehouseStock && !hasPositiveWarehouseStock ? (
+          {hasWarehouseSelection && hideZeroWarehouseStock && !hasPositiveStockForScope ? (
             <p className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
-              해당 창고에 보유 중인 상품이 없습니다.
+              {hasLocationSelection
+                ? '해당 상세위치에 보유 중인 상품이 없습니다.'
+                : '해당 창고에 보유 중인 상품이 없습니다.'}
             </p>
           ) : null}
           {formState.items.map((item, index) => {
@@ -1220,10 +1273,13 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
                 })
               : candidateWithStats;
             const productChoices =
-              hideZeroWarehouseStock && formState.warehouseCode && !normalizedSearch
+              hideZeroWarehouseStock && hasWarehouseSelection && !normalizedSearch
                 ? searchFiltered.filter(({ product, stats }) => {
-                    const quantity = stats?.warehouseQuantity ?? 0;
-                    if (quantity > 0) {
+                    const scopedQty =
+                      activeStockScope === 'location'
+                        ? stats?.locationQuantity ?? 0
+                        : stats?.warehouseQuantity ?? 0;
+                    if (scopedQty > 0) {
                       return true;
                     }
                     return selectedProduct?.sku === product.sku;
@@ -1307,16 +1363,23 @@ const NewOrderForm: React.FC<NewOrderFormProps> = ({
                           ? '상품 선택'
                           : normalizedSearch
                           ? '검색 결과가 없습니다.'
-                          : hideZeroWarehouseStock && formState.warehouseCode
-                          ? '보유 중인 상품이 없습니다.'
+                          : hideZeroWarehouseStock && hasWarehouseSelection
+                          ? hasLocationSelection
+                            ? '상세위치에 보유 중인 상품이 없습니다.'
+                            : '창고에 보유 중인 상품이 없습니다.'
                           : '상품 선택'}
                       </option>
                       {productChoices.map(({ product, stats }) => {
-                        const quantityText = formState.warehouseCode
+                        const warehouseQuantityText = hasWarehouseSelection
                           ? (stats?.warehouseQuantity ?? 0).toLocaleString('ko-KR')
                           : null;
-                        const optionLabel = formState.warehouseCode
-                          ? `${product.name} (${product.sku}) · ${quantityText}`
+                        const locationQuantityText = hasWarehouseSelection
+                          ? (stats?.locationQuantity ?? 0).toLocaleString('ko-KR')
+                          : null;
+                        const optionLabel = hasWarehouseSelection
+                          ? hasLocationSelection
+                            ? `${product.name} (${product.sku}) · 상세위치 ${locationQuantityText} / 창고 ${warehouseQuantityText}`
+                            : `${product.name} (${product.sku}) · ${warehouseQuantityText}`
                           : `${product.name} (${product.sku})`;
                         return (
                           <option key={product.sku} value={product.sku}>
@@ -1439,4 +1502,3 @@ export const __test__ = {
 };
 
 export default NewOrderForm;
-

@@ -12,6 +12,11 @@ interface ForecastChartCardProps {
   toolbar?: React.ReactNode;
   unit?: string | null;
   includeTodayAsForecast?: boolean;
+  accuracy?: {
+    wape?: number | null;
+    bias?: number | null;
+    coverage?: number | null;
+  } | null;
 }
 
 const ForecastChartCard: React.FC<ForecastChartCardProps> = ({
@@ -24,7 +29,15 @@ const ForecastChartCard: React.FC<ForecastChartCardProps> = ({
   children,
   unit,
   includeTodayAsForecast,
+  accuracy,
 }) => {
+  const formatAccuracy = (value?: number | null) => {
+    if (typeof value !== 'number' || Number.isNaN(value)) {
+      return 'N/A';
+    }
+    return `${value.toFixed(1)}%`;
+  };
+
   return (
     <motion.section
       className="col-span-12 rounded-3xl border border-white/70 bg-white/60 p-5 shadow-lg backdrop-blur-sm"
@@ -39,7 +52,18 @@ const ForecastChartCard: React.FC<ForecastChartCardProps> = ({
             {sku ? `품번 ${sku}` : 'SKU를 선택해 예측 곡선을 확인하세요.'}
           </p>
         </div>
-        {toolbar && <div className="flex items-center gap-2">{toolbar}</div>}
+        <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center">
+          {accuracy && (
+            <div className="flex flex-wrap items-center gap-1 text-[11px] font-semibold text-slate-600">
+              <span className="rounded-full bg-slate-100 px-2 py-1">WAPE {formatAccuracy(accuracy.wape)}</span>
+              <span className="rounded-full bg-slate-100 px-2 py-1">Bias {formatAccuracy(accuracy.bias)}</span>
+              <span className="rounded-full bg-slate-100 px-2 py-1">
+                P90 커버리지 {formatAccuracy(accuracy.coverage)}
+              </span>
+            </div>
+          )}
+          {toolbar && <div className="flex items-center gap-2">{toolbar}</div>}
+        </div>
       </div>
       <ForecastChart
         data={chartData}

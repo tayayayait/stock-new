@@ -1,13 +1,4 @@
 import * as React from 'react';
-import {
-  DndContext,
-  PointerSensor,
-  type DragEndEvent,
-  useDroppable,
-  useDraggable,
-  useSensor,
-  useSensors,
-} from '@dnd-kit/core';
 import Modal from '../../../../components/ui/Modal';
 import { useToast } from '../../../components/Toaster';
 import { emitInventoryRefreshEvent } from '../../../app/utils/inventoryEvents';
@@ -34,15 +25,22 @@ interface TransferHistoryEntry {
   toId: string;
   ts: number;
 }
-interface DroppableAreaProps {
-  id: string;
-  label: string;
-  highlight?: boolean;
-  children?: React.ReactNode;
-}
 const USER_ID = 'orders-transfer-ui';
 
 type LocationAllocation = { locationCode?: string; qty: number };
+
+const normalizeQuantityInputValue = (rawValue: string): string => {
+  const trimmed = rawValue.trim();
+  if (trimmed === '') {
+    return '';
+  }
+  const digitsOnly = trimmed.replace(/\D/g, '');
+  if (digitsOnly === '') {
+    return '';
+  }
+  const withoutLeadingZeros = digitsOnly.replace(/^0+/, '');
+  return withoutLeadingZeros === '' ? '0' : withoutLeadingZeros;
+};
 
 const planLocationAllocations = (item: WarehouseInventoryItem, quantity: number): LocationAllocation[] => {
   if (quantity <= 0) {
@@ -104,44 +102,16 @@ const useWarehouseLookup = (warehouses: OrdersWarehouse[]) =>
     });
     return map;
   }, [warehouses]);
-const DroppableArea: React.FC<DroppableAreaProps> = ({ id, label, highlight, children }) => {
-  const { setNodeRef, isOver } = useDroppable({ id, data: { target: id } });
-  return (
-    <div
-      ref={setNodeRef}
-      className={`h-full rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition ${
-        isOver || highlight ? 'ring-2 ring-blue-400' : ''
-      }`}
-    >
-      <div className="mb-2 text-xs font-semibold text-slate-500">{label}</div>
-      <div className="flex h-full flex-col gap-2">{children}</div>
-    </div>
-  );
-};
-const DraggableProduct: React.FC<{ item: WarehouseInventoryItem; disabled?: boolean }> = ({ item, disabled }) => {
-  const { attributes, listeners, setNodeRef, transform } = useDraggable({
-    id: item.sku,
-    data: { origin: 'from', name: item.name },
-    disabled,
-  });
-  const style = transform ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` } : undefined;
-  return (
-    <div
-      ref={setNodeRef}
-      {...listeners}
-      {...attributes}
-      style={style}
-      className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2"
-    >
-      <div>
-        <div className="text-sm font-medium text-slate-800">{item.name}</div>
-        <div className="text-xs text-slate-500">
-          {item.sku} · 재고 {item.onHand.toLocaleString('ko-KR')}
-        </div>
-      </div>
-    </div>
-  );
-};
+const ListPanel: React.FC<{ title: string; className?: string; children?: React.ReactNode }> = ({
+  title,
+  className,
+  children,
+}) => (
+  <div className={`flex flex-1 flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm ${className ?? ''}`}>
+    <div className="text-xs font-semibold text-slate-500">{title}</div>
+    <div className="flex flex-1 flex-col gap-3 text-sm text-slate-600">{children}</div>
+  </div>
+);
 const QuickSendButton: React.FC<{ onClick: () => void; disabled?: boolean }> = ({ onClick, disabled }) => (
   <button
     type="button"
@@ -159,7 +129,6 @@ const WarehouseTransferPanel: React.FC<WarehouseTransferPanelProps> = ({
   className,
 }) => {
   const showToast = useToast();
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const warehouseLookup = useWarehouseLookup(warehouses);
   const [{ from, to }, setPair] = React.useState<{ from?: string; to?: string }>(() =>
     resolveInitialPair(warehouses, defaultFromWarehouse ?? undefined, defaultToWarehouse ?? undefined),
@@ -178,7 +147,7 @@ const WarehouseTransferPanel: React.FC<WarehouseTransferPanelProps> = ({
     fromWarehouse: string;
     toWarehouse: string;
   } | null>(null);
-  const [quantityInput, setQuantityInput] = React.useState<number>(1);
+  const [quantityInput, setQuantityInput] = React.useState<string>('1');
   const isBusy = pendingCount > 0;
   const fromProducts = (from && inventoryIndex[from]) ?? [];
   const toProducts = (to && inventoryIndex[to]) ?? [];
@@ -339,7 +308,7 @@ const WarehouseTransferPanel: React.FC<WarehouseTransferPanelProps> = ({
         mode === 'batch' && selectedQty[sku]
           ? Math.min(sourceItem.onHand, Math.max(1, selectedQty[sku]))
           : 1;
-      setQuantityInput(preset);
+      setQuantityInput(normalizeQuantityInputValue(String(preset)));
       setQuantityPrompt({
         mode,
         sku,
@@ -419,7 +388,7 @@ const WarehouseTransferPanel: React.FC<WarehouseTransferPanelProps> = ({
       if (!quantityPrompt) {
         return;
       }
-      const normalized = Math.floor(quantityInput);
+      const normalized = Math.floor(Number(quantityInput));
       if (!Number.isFinite(normalized) || normalized <= 0) {
         showToast('Enter a quantity of at least 1.', { tone: 'info' });
         return;
@@ -435,7 +404,7 @@ const WarehouseTransferPanel: React.FC<WarehouseTransferPanelProps> = ({
         }));
         showToast('Added to the selection list.', { tone: 'success' });
         setQuantityPrompt(null);
-        setQuantityInput(1);
+        setQuantityInput('1');
         return;
       }
       const success = await moveNow(quantityPrompt.sku, normalized, {
@@ -445,7 +414,7 @@ const WarehouseTransferPanel: React.FC<WarehouseTransferPanelProps> = ({
       });
       if (success) {
         setQuantityPrompt(null);
-        setQuantityInput(1);
+        setQuantityInput('1');
       }
     },
     [moveNow, quantityInput, quantityPrompt, showToast],
@@ -459,14 +428,14 @@ const WarehouseTransferPanel: React.FC<WarehouseTransferPanelProps> = ({
       return rest;
     });
     setQuantityPrompt(null);
-    setQuantityInput(1);
+    setQuantityInput('1');
   }, [quantityPrompt]);
   const handleQuantityClose = React.useCallback(() => {
     if (isBusy) {
       return;
     }
     setQuantityPrompt(null);
-    setQuantityInput(1);
+    setQuantityInput('1');
   }, [isBusy]);
   const existingSelection = quantityPrompt ? selectedQty[quantityPrompt.sku] : undefined;
   const undoMove = React.useCallback(
@@ -486,18 +455,6 @@ const WarehouseTransferPanel: React.FC<WarehouseTransferPanelProps> = ({
     },
     [runTransfer, showToast],
   );
-  const handleDragEnd = React.useCallback(
-    (event: DragEndEvent) => {
-      const { active, over } = event;
-      if (!active || !over) {
-        return;
-      }
-      if (active.data?.current?.origin === 'from' && over.data?.current?.target === 'to') {
-        openQuantityPrompt(String(active.id), 'instant');
-      }
-    },
-    [openQuantityPrompt],
-  );
 const getWarehouseLabel = React.useCallback(
     (code?: string) => {
       if (!code) {
@@ -512,7 +469,7 @@ const getWarehouseLabel = React.useCallback(
   const containerClassName = React.useMemo(
     () =>
       [
-        'flex h-[640px] w-full flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm',
+        'flex min-h-[640px] w-full flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm',
         className,
       ]
         .filter(Boolean)
@@ -560,14 +517,6 @@ const getWarehouseLabel = React.useCallback(
                 <span className="mt-1 text-[11px] text-rose-500">동일 창고로는 이동할 수 없습니다.</span>
               ) : null}
             </div>
-            <button
-              type="button"
-              onClick={() => void moveSelected()}
-              disabled={isBusy || loading || Object.keys(selectedQty).length === 0}
-              className="ml-auto inline-flex items-center gap-2 rounded border border-blue-200 px-4 py-2 text-sm font-semibold text-blue-600 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              선택 이동
-            </button>
           </div>
         </div>
         <div className="flex flex-1 overflow-hidden">
@@ -605,7 +554,7 @@ const getWarehouseLabel = React.useCallback(
               )}
             </div>
           </aside>
-          <section className="flex-1 overflow-hidden bg-slate-50">
+          <section className="flex-1 bg-slate-50">
             {loading ? (
               <div className="flex h-full items-center justify-center text-sm text-slate-500">재고를 불러오는 중...</div>
             ) : loadError ? (
@@ -615,21 +564,13 @@ const getWarehouseLabel = React.useCallback(
                 </div>
               </div>
             ) : (
-              <div className="h-full overflow-y-auto px-6 py-6">
+              <div className="flex min-h-full flex-col gap-6 px-6 py-6">
                 <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                  <div className="mb-4 flex items-center justify-between">
+                  <div className="mb-4">
                     <div>
-                      <h3 className="text-base font-semibold text-slate-800">선택 이동</h3>
-                      <p className="text-xs text-slate-500">수량을 입력하고 여러 상품을 한 번에 이동할 수 있어요.</p>
+                      <h3 className="text-base font-semibold text-slate-800">바로 이동</h3>
+                      <p className="text-xs text-slate-500">수량을 입력해 상품을 즉시 이동할 수 있어요.</p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => void moveSelected()}
-                      disabled={isBusy || loading || Object.keys(selectedQty).length === 0}
-                      className="rounded border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-blue-300 hover:text-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      선택 이동
-                    </button>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="min-w-full text-sm text-slate-700">
@@ -637,14 +578,13 @@ const getWarehouseLabel = React.useCallback(
                         <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-500">
                           <th className="py-2">제품</th>
                           <th className="w-24 py-2 text-right">현재고</th>
-                          <th className="w-32 py-2 text-right">선택 이동</th>
                           <th className="w-24 py-2 text-right">바로 이동</th>
                         </tr>
                       </thead>
                       <tbody>
                         {from && fromProducts.length === 0 ? (
                           <tr>
-                            <td colSpan={4} className="py-6 text-center text-xs text-slate-400">
+                            <td colSpan={3} className="py-6 text-center text-xs text-slate-400">
                               선택한 창고에 표시할 재고가 없어요.
                             </td>
                           </tr>
@@ -659,25 +599,8 @@ const getWarehouseLabel = React.useCallback(
                                 {item.onHand.toLocaleString('ko-KR')}
                               </td>
                               <td className="py-3 text-right">
-                                <button
-                                  type="button"
-                                  onClick={() => openQuantityPrompt(item.sku, 'batch')}
-                                  disabled={isBusy || item.onHand <= 0}
-                                  className={`rounded border px-2 py-1 text-xs font-semibold transition ${
-                                    selectedQty[item.sku]
-                                      ? 'border-blue-300 text-blue-600'
-                                      : 'border-slate-200 text-slate-600'
-                                  } hover:border-blue-300 hover:text-blue-500 disabled:cursor-not-allowed disabled:opacity-60`}
-                                >
-                                  {selectedQty[item.sku] ? '선택 수정' : '선택'}
-                                </button>
-                                {selectedQty[item.sku] ? (
-                                  <div className="mt-1 text-[11px] text-blue-500">선택 완료</div>
-                                ) : null}
-                              </td>
-                              <td className="py-3 text-right">
                                 <QuickSendButton
-                                  onClick={() => openQuantityPrompt(item.sku, 'instant')}
+                                  onClick={() => openQuantityPrompt(item.sku)}
                                   disabled={isBusy || item.onHand <= 0}
                                 />
                               </td>
@@ -688,43 +611,70 @@ const getWarehouseLabel = React.useCallback(
                     </table>
                   </div>
                 </div>
-                <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-                  <div className="grid grid-cols-2 gap-4">
-                    <DroppableArea id="from" label={`드래그 목록 – ${getWarehouseLabel(from)}`}>
-                      {fromProducts.map((item) => (
-                        <div
-                          key={item.sku}
-                          className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"
-                        >
-                          <div className="flex-1">
-                            <DraggableProduct item={item} disabled={isBusy || item.onHand <= 0} />
-                          </div>
-                          <QuickSendButton
-                            onClick={() => openQuantityPrompt(item.sku, 'instant')}
-                            disabled={isBusy || item.onHand <= 0}
-                          />
-                        </div>
-                      ))}
-                    </DroppableArea>
-                    <DroppableArea id="to" highlight label={`새 위치 재고 – ${getWarehouseLabel(to)}`}>
-                      {toProducts.length === 0 ? (
-                        <p className="rounded-lg border border-dashed border-slate-200 p-3 text-xs text-slate-400">
-                          아직 표시할 재고가 없어요. 오른쪽으로 드롭하면 즉시 이동합니다.
-                        </p>
-                      ) : (
-                        toProducts.map((item) => (
-                          <div key={item.sku} className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                            <div className="text-sm font-medium text-slate-800">{item.name}</div>
-                            <div className="text-xs text-slate-500">
-                              {item.sku} · 재고 {item.onHand.toLocaleString('ko-KR')}
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  <ListPanel title={`출발 창고 재고 – ${getWarehouseLabel(from)}`}>
+                    {fromProducts.length === 0 ? (
+                      <p className="rounded-lg border border-slate-200 px-3 py-5 text-center text-xs text-slate-400">
+                        선택한 창고에 표시할 재고가 없어요.
+                      </p>
+                    ) : (
+                      fromProducts.map((item) => {
+                        const selectionCount = selectedQty[item.sku];
+                        return (
+                          <div key={item.sku} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                            <div className="text-sm font-semibold text-slate-800">{item.name}</div>
+                            <div className="text-xs text-slate-500">{item.sku}</div>
+                            <div className="mt-2 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+                              <span className="font-semibold text-slate-700">
+                                재고 {item.onHand.toLocaleString('ko-KR')} EA
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => openQuantityPrompt(item.sku, 'batch')}
+                                  disabled={isBusy || item.onHand <= 0}
+                                  className={`rounded border px-2 py-1 text-xs font-semibold transition ${
+                                    selectionCount ? 'border-blue-300 text-blue-600' : 'border-slate-200 text-slate-600'
+                                  } hover:border-blue-300 hover:text-blue-500 disabled:cursor-not-allowed disabled:opacity-60`}
+                                >
+                                  {selectionCount ? '선택 수정' : '선택'}
+                                </button>
+                                <QuickSendButton
+                                  onClick={() => openQuantityPrompt(item.sku, 'instant')}
+                                  disabled={isBusy || item.onHand <= 0}
+                                />
+                              </div>
                             </div>
+                            {selectionCount ? (
+                              <div className="mt-2 text-[11px] text-blue-500">
+                                선택 목록에 {selectionCount.toLocaleString('ko-KR')} EA가 저장되었습니다.
+                              </div>
+                            ) : null}
                           </div>
-                        ))
-                      )}
-                      <div className="mt-3 text-[11px] text-slate-400">오른쪽으로 드롭하면 즉시 이동합니다.</div>
-                    </DroppableArea>
-                  </div>
-                </DndContext>
+                        );
+                      })
+                    )}
+                  </ListPanel>
+                  <ListPanel title={`도착 창고 재고 – ${getWarehouseLabel(to)}`}>
+                    {toProducts.length === 0 ? (
+                      <p className="rounded-lg border border-dashed border-slate-200 px-3 py-5 text-center text-xs text-slate-400">
+                        아직 표시할 재고가 없어요. 선택 또는 바로 이동 버튼을 눌러 도착 창고를 채워보세요.
+                      </p>
+                    ) : (
+                      toProducts.map((item) => (
+                        <div key={item.sku} className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                          <div className="text-sm font-medium text-slate-800">{item.name}</div>
+                          <div className="text-xs text-slate-500">
+                            {item.sku} · 재고 {item.onHand.toLocaleString('ko-KR')} EA
+                          </div>
+                        </div>
+                      ))
+                    )}
+                    <div className="text-[11px] text-slate-400">
+                      선택 또는 바로 이동 버튼으로 도착 창고를 채워보세요.
+                    </div>
+                  </ListPanel>
+                </div>
               </div>
             )}
           </section>
@@ -751,7 +701,7 @@ const getWarehouseLabel = React.useCallback(
                 min={1}
                 max={quantityPrompt.maxQty}
                 value={quantityInput}
-                onChange={(event) => setQuantityInput(Number(event.target.value) || 0)}
+                onChange={(event) => setQuantityInput(normalizeQuantityInputValue(event.target.value))}
                 disabled={isBusy}
                 className="w-full rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-200 disabled:cursor-not-allowed disabled:bg-slate-100"
               />

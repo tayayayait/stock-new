@@ -10,6 +10,12 @@ import {
   type InventoryRecord,
 } from '../stores/inventoryStore.js';
 import { __adjustProductMovementTotals } from '../routes/products.js';
+import {
+  recordPurchaseReceipt,
+  type PurchaseReceiptResult,
+} from '../stores/purchaseOrdersStore.js';
+import { recordSalesShipment } from '../stores/salesOrdersStore.js';
+import { recordLeadTimeSample, recordFinalLeadTime } from '../stores/leadTimeStore.js';
 
 type MovementTotals = { inbound: number; outbound: number };
 
@@ -192,6 +198,22 @@ export const finalizeMovementDraft = (draft: MovementDraft): MovementProcessingR
 
   addMovementRecord(movement);
   recordMovementForAnalytics(movement);
+
+  if (movement.type === 'RECEIPT' && movement.poId && movement.poLineId) {
+    const receipt = recordPurchaseReceipt(movement.poId, movement.poLineId, movement.qty, createdAt);
+    if (receipt) {
+      const { order, previousReceivedQty, line } = receipt;
+      if (previousReceivedQty === 0 && line.receivedQty > 0 && order.approvedAt) {
+        recordLeadTimeSample(movement.sku, order.vendorId, movement.poId, movement.poLineId, order.approvedAt, createdAt);
+      }
+      if (line.status === 'closed') {
+        recordFinalLeadTime(movement.poId, movement.poLineId, createdAt);
+      }
+    }
+  }
+  if (movement.type === 'ISSUE' && movement.soId && movement.soLineId) {
+    recordSalesShipment(movement.soId, movement.soLineId, movement.qty, createdAt);
+  }
 
   const { inbound, outbound } = calculateMovementTotalsDelta(movement);
   if (inbound > 0 || outbound > 0) {

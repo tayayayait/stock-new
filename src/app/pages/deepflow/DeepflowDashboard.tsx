@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useOutletContext } from 'react-router-dom';
 import {
   createEmptyProduct,
   DEFAULT_UNIT,
@@ -42,10 +43,12 @@ import PartnerManagementPanel from './components/PartnerManagementPanel';
 import CategoryManagementPanel from './components/CategoryManagementPanel';
 import ProductCsvUploadDialog from './components/ProductCsvUploadDialog';
 import CategoryManageDialog from './components/CategoryManageDialog';
+import PolicyOpsDashboard from './components/PolicyOpsDashboard';
 import { type ForecastRange } from './components/ForecastChart';
 import ForecastChartCard from './components/ForecastChartCard';
 import ForecastInsightsSection from './components/ForecastInsightsSection';
-import { type ActionPlanItem } from './components/ActionPlanCards';
+import type { ActionPlanItem, ActionPlanRecord } from '../../../services/actionPlans';
+import { fetchLatestActionPlan, submitActionPlan, approveActionPlan } from '../../../services/actionPlans';
 import { extractFirstDetail, validateProductDraft } from './productValidation';
 import ProductForm from './components/ProductForm';
 import ProductDetailPanel from './components/ProductDetailPanel';
@@ -55,11 +58,15 @@ import {
   savePolicies,
   fetchPolicies,
   requestForecastRecommendation,
+  upsertPolicy,
   type PolicyDraft,
   type ForecastRecommendationResult,
   type ForecastRecommendationPayload,
 } from '../../../services/policies';
 import { fetchInventoryAnalysis } from '../../../services/inventoryDashboard';
+import PurchasePage from './components/PurchasePage';
+import SalesPage from './components/SalesPage';
+import { DEFAULT_DASHBOARD_TAB, SmartWarehouseOutletContext } from '../../layout/SmartWarehouseLayout';
 
 interface ForecastRow {
   date: string;
@@ -88,6 +95,8 @@ interface InsightStateEntry {
   key?: string;
   data?: ForecastInsight;
   error?: string | null;
+  actionPlan?: ActionPlanRecord | null;
+  planFetchedAt?: number;
 }
 
 interface ForecastPageProps {
@@ -182,6 +191,48 @@ const writePolicyDraftBackup = (rows: PolicyRow[]) => {
   }
 };
 
+const MANUAL_SKU_STORAGE_KEY = 'stock-console:manual-policy-skus';
+const readManualSkuBackup = (): string[] => {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(MANUAL_SKU_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const unique = new Set<string>();
+    parsed.forEach((entry) => {
+      if (typeof entry === 'string' && entry.trim().length > 0) {
+        unique.add(normalizeSku(entry));
+      }
+    });
+    return Array.from(unique.values());
+  } catch {
+    return [];
+  }
+};
+
+const writeManualSkuBackup = (skus: string[]) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const normalized = Array.from(new Set((skus ?? []).map((sku) => normalizeSku(sku))));
+    if (normalized.length === 0) {
+      window.localStorage.removeItem(MANUAL_SKU_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(MANUAL_SKU_STORAGE_KEY, JSON.stringify(normalized));
+  } catch {
+    // Ignore quota errors or unavailable storage
+  }
+};
+
 const normalizePolicyRow = (row: PolicyRow): PolicyRow => ({
   ...row,
   sku: normalizeSku(row.sku),
@@ -223,6 +274,129 @@ const INITIAL_FORECAST: ForecastRow[] = [
 ];
 
 const SERVICE_LEVEL_PRESETS = [85, 90, 93, 95, 97.5, 99] as const;
+const BULK_APPLY_DEVIATION_THRESHOLD = 0.2; // ±20%
+
+type BulkApplyModeOption = 'fill' | 'overwrite';
+type BulkApplyTargetContext = 'search' | 'all';
+
+interface BulkApplyOptions {
+  mode: BulkApplyModeOption;
+  includeLeadTime: boolean;
+  includeServiceLevel: boolean;
+  includeManual: boolean;
+}
+
+interface BulkApplyProgress {
+  total: number;
+  completed: number;
+}
+
+interface BulkApplyResultSummary {
+  total: number;
+  applied: number;
+  skipped: Array<{ sku: string; reason: string }>;
+  failed: Array<{ sku: string; reason: string }>;
+}
+
+const DEFAULT_BULK_APPLY_OPTIONS: BulkApplyOptions = {
+  mode: 'fill',
+  includeLeadTime: false,
+  includeServiceLevel: false,
+  includeManual: false,
+};
+
+interface SanitizedRecommendationValues {
+  forecastDemand: number | null;
+  demandStdDev: number | null;
+  leadTimeDays: number | null;
+  serviceLevelPercent: number | null;
+}
+
+const toNonNegativeInteger = (value: number | null | undefined): number | null => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const normalized = Math.max(0, Math.round(value));
+  return Number.isFinite(normalized) ? normalized : null;
+};
+
+const clampServiceLevelPercentValue = (value: number | null | undefined): number | null => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const clamped = Math.max(50, Math.min(99.9, value));
+  return clamped;
+};
+
+const sanitizeRecommendationValues = (result: ForecastRecommendationResult): SanitizedRecommendationValues => ({
+  forecastDemand: toNonNegativeInteger(result.forecastDemand),
+  demandStdDev: toNonNegativeInteger(result.demandStdDev),
+  leadTimeDays: toNonNegativeInteger(result.leadTimeDays),
+  serviceLevelPercent: clampServiceLevelPercentValue(result.serviceLevelPercent),
+});
+
+const applyBulkRecommendationToRow = (
+  row: PolicyRow,
+  values: SanitizedRecommendationValues,
+  options: BulkApplyOptions,
+): { nextRow: PolicyRow | null; changed: boolean; reason?: string } => {
+  const nextRow: PolicyRow = { ...row };
+  const outcomes: Array<{ applied: boolean; reason?: string }> = [];
+
+  const attemptField = (
+    field: keyof PolicyRow,
+    label: string,
+    nextValue: number | null,
+    include: boolean,
+  ) => {
+    if (!include) {
+      return;
+    }
+    if (nextValue === null) {
+      outcomes.push({ applied: false, reason: `${label} 추천값 없음` });
+      return;
+    }
+    const currentValue = (nextRow[field] as number | null) ?? null;
+    if (options.mode === 'fill' && currentValue !== null) {
+      outcomes.push({ applied: false, reason: `${label} 기존 값을 유지했습니다.` });
+      return;
+    }
+    if (options.mode === 'overwrite' && currentValue !== null) {
+      const baseline = Math.max(Math.abs(currentValue), 1);
+      const deviation = Math.abs(nextValue - currentValue) / baseline;
+      if (deviation > BULK_APPLY_DEVIATION_THRESHOLD) {
+        outcomes.push({
+          applied: false,
+          reason: `${label} 변동폭 ${Math.round(deviation * 100)}% > 임계치 ±${Math.round(BULK_APPLY_DEVIATION_THRESHOLD * 100)}%`,
+        });
+        return;
+      }
+    }
+    if (currentValue === nextValue) {
+      outcomes.push({ applied: false, reason: `${label} 변화 없음` });
+      return;
+    }
+    (nextRow as PolicyRow)[field] = nextValue as never;
+    outcomes.push({ applied: true });
+  };
+
+  attemptField('forecastDemand', '예측 수요량', values.forecastDemand, true);
+  attemptField('demandStdDev', '수요 표준편차', values.demandStdDev, true);
+  attemptField('leadTimeDays', '리드타임', values.leadTimeDays, options.includeLeadTime);
+  attemptField(
+    'serviceLevelPercent',
+    '서비스 수준',
+    values.serviceLevelPercent,
+    options.includeServiceLevel,
+  );
+
+  const changed = outcomes.some((entry) => entry.applied);
+  if (!changed) {
+    const reason = outcomes.find((entry) => entry.reason)?.reason ?? '적용 가능한 필드가 없습니다.';
+    return { nextRow: null, changed: false, reason };
+  }
+  return { nextRow, changed: true };
+};
 
 const FALLBACK_LEAD_TIME_DAYS = 14;
 const FALLBACK_SERVICE_LEVEL_PERCENT = 95;
@@ -483,49 +657,49 @@ const buildActionPlans = (product: Product, metrics: ForecastMetrics): ActionPla
   const items: ActionPlanItem[] = [];
   const available = availableStock(product);
   const orderQty = Math.max(Math.round(metrics.recommendedOrderQty), 0);
+  const reorderGap = Math.max(metrics.reorderPoint - available, 0);
+
+  const nextWeek = new Date();
+  nextWeek.setDate(nextWeek.getDate() + 7);
+  const actionWhen = nextWeek.toISOString().slice(0, 10);
 
   items.push({
-    id: 'reorder',
-    title: '발주 제안',
-    tone: orderQty > 0 ? 'info' : 'success',
-    description:
-      orderQty > 0
-        ? `${product.name}의 가용재고가 권장 재주문점 이하입니다. ${orderQty.toLocaleString()}개 발주를 검토하세요.`
-        : `${product.name}의 가용재고가 권장 재주문점을 상회하고 있어 추가 발주가 필요하지 않습니다.`,
-    metricLabel: orderQty > 0 ? `${orderQty.toLocaleString()}개 권장` : `${available.toLocaleString()}개 보유`,
+    id: 'llm-local-reorder',
+    who: '영업기획팀',
+    what:
+      reorderGap > 0
+        ? `${orderQty.toLocaleString()}EA 발주 확정`
+        : '권장 발주량을 유지하고 재고를 모니터링',
+    when: actionWhen,
+    rationale:
+      reorderGap > 0
+        ? '가용재고가 재주문점 이하로 내려가 추가 보충이 필요합니다.'
+        : '현재 재고가 목표 범위를 유지하고 있어 추가 발주가 필요하지 않습니다.',
+    confidence: reorderGap > 0 ? 0.74 : 0.58,
+    kpi: {
+      name: '서비스 레벨',
+      target: '≥95%',
+      window: '향후 4주',
+    },
   });
 
-  if (metrics.projectedStockoutDate) {
-    items.push({
-      id: 'stockout',
-      title: '재고 소진 경고',
-      tone: 'warning',
-      description: `${metrics.projectedStockoutDate} 전에 재고가 소진될 것으로 예상됩니다. 출고 속도 조절이나 대체 상품을 검토하세요.`,
-      metricLabel: metrics.projectedStockoutDate,
-    });
-  } else {
-    items.push({
-      id: 'coverage',
-      title: '재고 커버리지',
-      tone: 'success',
-      description: '예상 수요 대비 충분한 재고를 확보하고 있습니다. 판매 추이를 모니터링하면서 현 수준을 유지하세요.',
-      metricLabel: `${available.toLocaleString()}개 가용`,
-    });
-  }
-
-  const coverageGap = metrics.currentTotalStock - metrics.reorderPoint;
   items.push({
-    id: 'buffer',
-    title: coverageGap >= 0 ? '안전재고 충족' : '안전재고 미달',
-    tone: coverageGap >= 0 ? 'success' : 'warning',
-    description:
-      coverageGap >= 0
-        ? '현재 재고가 안전재고 이상을 유지하고 있습니다. 입고 일정과 프로모션 계획을 재확인하세요.'
-        : '안전재고 이하로 떨어져 있어 보충이 필요합니다. 리드타임을 고려한 긴급 발주를 검토하세요.',
-    metricLabel:
-      coverageGap >= 0
-        ? `${Math.round(coverageGap).toLocaleString()}개 초과`
-        : `${Math.abs(Math.round(coverageGap)).toLocaleString()}개 부족`,
+    id: 'llm-local-supply',
+    who: '공급망팀',
+    what: metrics.projectedStockoutDate
+      ? `재고 소진 예상일(${metrics.projectedStockoutDate}) 이전 재배치 플랜 수립`
+      : '입고 일정·리드타임 검증 및 공급 제약 점검',
+    when: actionWhen,
+    rationale:
+      metrics.projectedStockoutDate !== null
+        ? '수요 대비 재고 커버리지가 짧아 대체 공급원을 확보해야 합니다.'
+        : '리드타임과 공급 편차를 점검해 예측 정확도를 유지합니다.',
+    confidence: metrics.projectedStockoutDate ? 0.71 : 0.6,
+    kpi: {
+      name: '재고일수(DOS)',
+      target: metrics.projectedStockoutDate ? '≥21일' : '20~30일',
+      window: '향후 8주',
+    },
   });
 
   return items;
@@ -855,12 +1029,20 @@ const FORECAST_PERIOD_OPTIONS: Record<ForecastPeriodLabel, number> = {
   '\uC721\uB2EC \uD6C4': 24,
 };
 
-type ChartWindowMonths = 12 | 6 | 3;
+type ChartGranularity = 'month' | 'week';
+type ChartWindowMonths = 24 | 12 | 6 | 3;
 
 const CHART_WINDOW_OPTIONS: ReadonlyArray<{ label: string; months: ChartWindowMonths }> = [
+  { months: 24, label: '이전 24개월' },
   { months: 12, label: '이전 12개월' },
   { months: 6, label: '이전 6개월' },
   { months: 3, label: '이전 3개월' },
+];
+
+const WEEK_WINDOW_OPTIONS: ReadonlyArray<{ label: string; months: ChartWindowMonths }> = [
+  { months: 12, label: '최근 52주' },
+  { months: 6, label: '최근 26주' },
+  { months: 3, label: '최근 13주' },
 ];
 
 const MONTHLY_SHIPMENT_KEY = '\uCD9C\uACE0\uB7C9';
@@ -1643,6 +1825,12 @@ interface PolicyEditDialogProps {
     demandStdDev: number | null;
     smoothingAlpha: number | null;
   }>;
+  onAutoSave?: (next: {
+    forecastDemand: number | null;
+    demandStdDev: number | null;
+    leadTimeDays: number | null;
+    serviceLevelPercent: number | null;
+  }) => Promise<void>;
 }
 
 const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
@@ -1654,6 +1842,7 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
   onSubmit,
   onRecommend,
   onApplyEwma,
+  onAutoSave,
 }) => {
   const [demand, setDemand] = useState<string>(value.forecastDemand?.toString() ?? '');
   const [std, setStd] = useState<string>(value.demandStdDev?.toString() ?? '');
@@ -1707,6 +1896,18 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
     return Number.isFinite(p as number) ? serviceLevelPercentageToZ(p as number) : null;
   }, [service]);
 
+  const appendAnalysisInfo = useCallback((message: string) => {
+    setAnalysisInfo((prev) => {
+      if (!prev) {
+        return message;
+      }
+      if (prev.includes(message)) {
+        return prev;
+      }
+      return `${prev} · ${message}`;
+    });
+  }, []);
+
   const handleRecommendClick = useCallback(async () => {
     if (!onRecommend) {
       return;
@@ -1727,7 +1928,7 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
             forecastDemand: ewma.forecastDemand ?? result.forecastDemand,
             demandStdDev: ewma.demandStdDev ?? result.demandStdDev,
           };
-          setAnalysisInfo(
+          appendAnalysisInfo(
             `최근 ${EWMA_ANALYSIS_DAYS.toLocaleString()}일 출고 데이터를 기준으로 EWMA(α=${FALLBACK_SMOOTHING_ALPHA}) 값을 적용했습니다.`,
           );
         } catch (error) {
@@ -1738,7 +1939,39 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
           setAnalysisError(message);
         }
       }
+      const nextValues = {
+        forecastDemand: merged.forecastDemand ?? toNonNegativeInt(demand),
+        demandStdDev: merged.demandStdDev ?? toNonNegativeInt(std),
+        leadTimeDays: merged.leadTimeDays ?? toNonNegativeInt(lead),
+        serviceLevelPercent: merged.serviceLevelPercent ?? toServicePercent(service),
+      };
       setRecommendation(merged);
+      if (merged.forecastDemand !== null) {
+        setDemand(merged.forecastDemand.toString());
+      }
+      if (merged.demandStdDev !== null) {
+        setStd(merged.demandStdDev.toString());
+      }
+      if (merged.leadTimeDays !== null) {
+        setLead(merged.leadTimeDays.toString());
+      }
+      if (merged.serviceLevelPercent !== null) {
+        const formatted = Math.round(merged.serviceLevelPercent * 10) / 10;
+        setService(formatted.toString());
+      }
+
+      if (onAutoSave) {
+        try {
+          await onAutoSave(nextValues);
+          appendAnalysisInfo('추천값을 자동 적용하고 저장했습니다.');
+        } catch (error) {
+          const message =
+            error instanceof Error && error.message
+              ? error.message
+              : '추천값을 자동 저장하지 못했습니다.';
+          setRecommendationError(message);
+        }
+      }
     } catch (error) {
       const message =
         error instanceof Error && error.message ? error.message : '정책을 불러오지 못했습니다.';
@@ -1746,26 +1979,7 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
     } finally {
       setRecommendationLoading(false);
     }
-  }, [onApplyEwma, onRecommend, sku]);
-
-  const handleApplyRecommendation = useCallback(() => {
-    if (!recommendation) {
-      return;
-    }
-    if (recommendation.forecastDemand !== null) {
-      setDemand(recommendation.forecastDemand.toString());
-    }
-    if (recommendation.demandStdDev !== null) {
-      setStd(recommendation.demandStdDev.toString());
-    }
-    if (recommendation.leadTimeDays !== null) {
-      setLead(recommendation.leadTimeDays.toString());
-    }
-    if (recommendation.serviceLevelPercent !== null) {
-      const formatted = Math.round(recommendation.serviceLevelPercent * 10) / 10;
-      setService(formatted.toString());
-    }
-  }, [recommendation]);
+  }, [appendAnalysisInfo, demand, lead, onApplyEwma, onAutoSave, onRecommend, service, sku, std]);
 
   if (!open) return null;
 
@@ -1852,15 +2066,6 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
             >
               {recommendationLoading ? '산출 중...' : '추천값 자동산출'}
             </button>
-            {recommendation && (
-              <button
-                type="button"
-                className="rounded-xl bg-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
-                onClick={handleApplyRecommendation}
-              >
-                추천값 적용
-              </button>
-            )}
           </div>
 
           {recommendationError && (
@@ -1912,6 +2117,249 @@ const PolicyEditDialog: React.FC<PolicyEditDialogProps> = ({
   );
 };
 
+interface BulkApplyDialogProps {
+  open: boolean;
+  options: BulkApplyOptions;
+  targetCount: number;
+  targetContext: BulkApplyTargetContext;
+  applying: boolean;
+  progress: BulkApplyProgress | null;
+  summary: BulkApplyResultSummary | null;
+  onClose: () => void;
+  onConfirm: () => void;
+  onOptionChange: (next: Partial<BulkApplyOptions>) => void;
+  disabled?: boolean;
+}
+
+const BulkApplyDialog: React.FC<BulkApplyDialogProps> = ({
+  open,
+  options,
+  targetCount,
+  targetContext,
+  applying,
+  progress,
+  summary,
+  onClose,
+  onConfirm,
+  onOptionChange,
+  disabled = false,
+}) => {
+  if (!open) {
+    return null;
+  }
+
+  const handleOptionChange = (partial: Partial<BulkApplyOptions>) => {
+    onOptionChange({ ...options, ...partial });
+  };
+
+  const confirmLabel = summary
+    ? '다시 적용'
+    : applying
+      ? '적용 중...'
+      : targetCount > 0
+        ? `적용 시작 (${targetCount.toLocaleString()}건)`
+        : '적용할 정책이 없습니다';
+
+  const cancelLabel = summary ? '닫기' : '취소';
+  const confirmDisabled = disabled || applying || targetCount === 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4 py-8">
+      <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-xl">
+        <div className="flex items-start justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-slate-900">전체 추천값 일괄 적용</h3>
+            <p className="mt-1 text-sm text-slate-500">
+              검색어 입력 여부에 따라 대상을 자동으로 정해 추천값을 다시 계산해 저장합니다.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="rounded-full p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+            onClick={onClose}
+            aria-label="전체 추천값 일괄 적용 닫기"
+            disabled={applying}
+          >
+            <span aria-hidden>×</span>
+          </button>
+        </div>
+
+        <div className="mt-4 space-y-5">
+          <section className="rounded-xl border border-slate-200 p-4">
+            <p className="text-sm font-medium text-slate-700">덮어쓰기 규칙</p>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm shadow-sm transition hover:border-indigo-200">
+                <input
+                  type="radio"
+                  name="bulk-mode"
+                  className="mt-1 h-4 w-4 text-indigo-600 focus:ring-indigo-500"
+                  checked={options.mode === 'fill'}
+                  onChange={() => handleOptionChange({ mode: 'fill' })}
+                  disabled={applying}
+                />
+                <span>
+                  <span className="font-semibold text-slate-900">빈 값만 채우기 (기본)</span>
+                  <span className="mt-1 block text-xs text-slate-500">
+                    예측 수요/표준편차가 비어 있는 SKU만 추천값으로 채웁니다.
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm shadow-sm transition hover:border-indigo-200">
+                <input
+                  type="radio"
+                  name="bulk-mode"
+                  className="mt-1 h-4 w-4 text-indigo-600 focus:ring-indigo-500"
+                  checked={options.mode === 'overwrite'}
+                  onChange={() => handleOptionChange({ mode: 'overwrite' })}
+                  disabled={applying}
+                />
+                <span>
+                  <span className="font-semibold text-slate-900">모든 값 덮어쓰기</span>
+                  <span className="mt-1 block text-xs text-slate-500">
+                    예측 수요와 표준편차를 현재 추천값으로 덮어씁니다. ±20% 이상 변동은 보류합니다.
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <label className="flex items-start gap-3 rounded-lg border border-slate-100 p-3 text-sm shadow-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 text-indigo-600 focus:ring-indigo-500"
+                  checked={options.includeLeadTime}
+                  onChange={(event) => handleOptionChange({ includeLeadTime: event.target.checked })}
+                  disabled={applying}
+                />
+                <span>
+                  <span className="font-semibold text-slate-900">리드타임도 갱신</span>
+                  <span className="mt-1 block text-xs text-slate-500">
+                    추천 리드타임을 적용합니다. 빈 값만 채우기 모드에서는 비어 있을 때만 반영합니다.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-3 rounded-lg border border-slate-100 p-3 text-sm shadow-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 text-indigo-600 focus:ring-indigo-500"
+                  checked={options.includeServiceLevel}
+                  onChange={(event) => handleOptionChange({ includeServiceLevel: event.target.checked })}
+                  disabled={applying}
+                />
+                <span>
+                  <span className="font-semibold text-slate-900">서비스 수준도 갱신</span>
+                  <span className="mt-1 block text-xs text-slate-500">
+                    추천 서비스 수준을 적용합니다. 조직의 목표 값과 다를 경우 주의하세요.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-3 rounded-lg border border-slate-100 p-3 text-sm shadow-sm md:col-span-2">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 text-indigo-600 focus:ring-indigo-500"
+                  checked={options.includeManual}
+                  onChange={(event) => handleOptionChange({ includeManual: event.target.checked })}
+                  disabled={applying}
+                />
+                <span>
+                  <span className="font-semibold text-slate-900">수동관리 SKU 포함(강제 적용)</span>
+                  <span className="mt-1 block text-xs text-slate-500">
+                    기본은 수동으로 관리 중인 SKU를 자동 적용에서 제외합니다. 체크 시 해당 SKU도 포함됩니다.
+                  </span>
+                </span>
+              </label>
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium text-slate-900">대상 SKU</span>
+              <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-600">
+                {targetContext === 'search' ? '현재 검색 결과' : '모든 SKU'}
+              </span>
+              <span className="rounded-full bg-white px-3 py-1 text-xs text-slate-500 shadow-sm">
+                {targetCount.toLocaleString()}건
+              </span>
+            </div>
+            <p className="mt-2 text-xs text-slate-500">
+              {targetContext === 'search'
+                ? '검색어가 입력된 동안에는 해당 검색 결과 전체에만 적용합니다.'
+                : '검색어가 없으므로 등록된 모든 SKU에 적용합니다.'}
+            </p>
+            {applying && progress && (
+              <p className="mt-2 text-xs text-indigo-600">
+                진행 중: {progress.completed.toLocaleString()} / {progress.total.toLocaleString()}
+              </p>
+            )}
+            {summary && (
+              <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-600">
+                <p>
+                  총 {summary.total.toLocaleString()}건 중{' '}
+                  <span className="font-semibold text-emerald-600">
+                    {summary.applied.toLocaleString()}건
+                  </span>
+                  을 적용했습니다.
+                </p>
+                <p className="mt-1">
+                  건너뜀 {summary.skipped.length.toLocaleString()}건 · 실패{' '}
+                  {summary.failed.length.toLocaleString()}건
+                </p>
+                {(summary.skipped.length > 0 || summary.failed.length > 0) && (
+                  <div className="mt-2 max-h-32 overflow-auto rounded border border-slate-100 bg-slate-50 p-2">
+                    {summary.skipped.length > 0 && (
+                      <div>
+                        <p className="text-[11px] font-semibold text-slate-700">건너뜀</p>
+                        <ul className="mt-1 text-[11px] text-slate-500">
+                          {summary.skipped.map((entry) => (
+                            <li key={`skip-${entry.sku}`}>
+                              {entry.sku}: {entry.reason}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {summary.failed.length > 0 && (
+                      <div className="mt-2">
+                        <p className="text-[11px] font-semibold text-rose-700">실패</p>
+                        <ul className="mt-1 text-[11px] text-rose-600">
+                          {summary.failed.map((entry) => (
+                            <li key={`fail-${entry.sku}`}>
+                              {entry.sku}: {entry.reason}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <div className="mt-6 flex justify-end gap-2 border-t border-slate-100 pt-4">
+          <button
+            type="button"
+            className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 shadow-sm transition hover:border-slate-300 hover:text-slate-900"
+            onClick={onClose}
+            disabled={applying}
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-slate-300"
+            onClick={onConfirm}
+            disabled={confirmDisabled}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const PoliciesPage: React.FC<PoliciesPageProps> = ({
   skus,
   allProducts,
@@ -1932,8 +2380,14 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
   const manualOverrideRef = useRef<Set<string>>(new Set());
   const [editOpen, setEditOpen] = useState(false);
   const [editSku, setEditSku] = useState<string | null>(null);
+  const [bulkDialogOpen, setBulkDialogOpen] = useState(false);
+  const [bulkOptions, setBulkOptions] = useState<BulkApplyOptions>(DEFAULT_BULK_APPLY_OPTIONS);
+  const [bulkApplying, setBulkApplying] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<BulkApplyProgress | null>(null);
+  const [bulkSummary, setBulkSummary] = useState<BulkApplyResultSummary | null>(null);
 
   useEffect(() => {
+    manualOverrideRef.current.clear();
     if (!persistedManualSkus || persistedManualSkus.length === 0) {
       return;
     }
@@ -1945,6 +2399,58 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
 
   const markManualOverride = useCallback((sku: string) => {
     manualOverrideRef.current.add(normalizeSku(sku));
+  }, []);
+
+  const addManualSku = useCallback(
+    (sku: string) => {
+      if (!onPersistedSkusChange) {
+        return;
+      }
+      const normalized = normalizeSku(sku);
+      const prev = persistedManualSkus ?? [];
+      if (prev.includes(normalized)) {
+        return;
+      }
+      onPersistedSkusChange([...prev, normalized]);
+    },
+    [onPersistedSkusChange, persistedManualSkus],
+  );
+
+  const removeManualSku = useCallback(
+    (sku: string) => {
+      if (!onPersistedSkusChange) {
+        return;
+      }
+      const normalized = normalizeSku(sku);
+      const prev = persistedManualSkus ?? [];
+      if (prev.length === 0) {
+        return;
+      }
+      const next = prev.filter((entry) => entry !== normalized);
+      if (next.length === prev.length) {
+        return;
+      }
+      onPersistedSkusChange(next);
+    },
+    [onPersistedSkusChange, persistedManualSkus],
+  );
+
+  const openBulkApplyDialog = useCallback(() => {
+    setBulkSummary(null);
+    setBulkProgress(null);
+    setBulkDialogOpen(true);
+  }, []);
+
+  const closeBulkApplyDialog = useCallback(() => {
+    if (bulkApplying) {
+      return;
+    }
+    setBulkDialogOpen(false);
+  }, [bulkApplying]);
+
+  const handleBulkOptionChange = useCallback((partial: Partial<BulkApplyOptions>) => {
+    setBulkSummary(null);
+    setBulkOptions((prev) => ({ ...prev, ...partial }));
   }, []);
 
   const showInitialLoading = !ready && loading;
@@ -1990,10 +2496,33 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
 
   const registeredRows = useMemo(() => {
     if (productBySku.size === 0) {
-      return filteredRows;
+      return [];
     }
     return filteredRows.filter((row) => productBySku.has(normalizeSku(row.sku)));
   }, [filteredRows, productBySku]);
+
+  const isSearchFiltering = search.trim().length > 0;
+  const bulkTargetContext: BulkApplyTargetContext = isSearchFiltering ? 'search' : 'all';
+
+  const bulkTargetCount = useMemo(() => {
+    const source = isSearchFiltering ? registeredRows : policyRows;
+    if (!source || source.length === 0) {
+      return 0;
+    }
+    const seen = new Set<string>();
+    let count = 0;
+    source.forEach((row) => {
+      const normalized = normalizeSku(row.sku);
+      if (seen.has(normalized)) {
+        return;
+      }
+      seen.add(normalized);
+      if (productBySku.has(normalized)) {
+        count += 1;
+      }
+    });
+    return count;
+  }, [isSearchFiltering, policyRows, productBySku, registeredRows]);
 
   const handleForecastRecommendation = useCallback(
     async (targetSku: string): Promise<ForecastRecommendationResult> => {
@@ -2039,6 +2568,146 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
     },
     [forecastCache, policyRows, productBySku],
   );
+
+  const handleBulkApplyConfirm = useCallback(async () => {
+    if (bulkApplying) {
+      return;
+    }
+
+    const sourceRows = isSearchFiltering ? registeredRows : policyRows;
+    const targetSkus = Array.from(
+      new Set(
+        sourceRows
+          .map((row) => normalizeSku(row.sku))
+          .filter((sku) => sku && productBySku.has(sku)),
+      ),
+    );
+
+    if (targetSkus.length === 0) {
+      setStatus({ type: 'error', text: '적용할 정책을 찾지 못했습니다.' });
+      setBulkDialogOpen(false);
+      return;
+    }
+
+    const skipped: Array<{ sku: string; reason: string }> = [];
+    const failed: Array<{ sku: string; reason: string }> = [];
+
+    const actionable = targetSkus.filter((sku) => {
+      if (manualOverrideRef.current.has(sku) && !bulkOptions.includeManual) {
+        skipped.push({ sku, reason: '수동으로 관리 중인 SKU라 자동 적용하지 않았습니다.' });
+        return false;
+      }
+      return true;
+    });
+
+    if (actionable.length === 0) {
+      setBulkSummary({
+        total: targetSkus.length,
+        applied: 0,
+        skipped,
+        failed,
+      });
+      setStatus({ type: 'error', text: '자동 적용 가능한 SKU가 없습니다.' });
+      return;
+    }
+
+    setBulkApplying(true);
+    setBulkProgress({ total: actionable.length, completed: 0 });
+    setBulkSummary(null);
+    setStatus(null);
+
+    const updates = new Map<string, PolicyRow>();
+
+    for (let index = 0; index < actionable.length; index += 1) {
+      const sku = actionable[index];
+      const currentRow = policyRows.find((row) => normalizeSku(row.sku) === sku);
+      if (!currentRow) {
+        skipped.push({ sku, reason: '정책 데이터를 찾지 못했습니다.' });
+        setBulkProgress({ total: actionable.length, completed: index + 1 });
+        continue;
+      }
+
+      try {
+        const recommendation = await handleForecastRecommendation(sku);
+        const sanitized = sanitizeRecommendationValues(recommendation);
+        const result = applyBulkRecommendationToRow(currentRow, sanitized, bulkOptions);
+        if (result.changed && result.nextRow) {
+          updates.set(sku, result.nextRow);
+        } else {
+          skipped.push({
+            sku,
+            reason: result.reason ?? '적용할 변경이 없습니다.',
+          });
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : '추천값을 가져오지 못했습니다.';
+        failed.push({ sku, reason: message });
+      }
+
+      setBulkProgress({ total: actionable.length, completed: index + 1 });
+    }
+
+    const totalApplied = updates.size;
+    let saveErrorMessage: string | null = null;
+    let nextRowsSnapshot: PolicyRow[] | null = null;
+
+    if (totalApplied > 0) {
+      nextRowsSnapshot = policyRows
+        .map((row) => {
+          const normalized = normalizeSku(row.sku);
+          const updated = updates.get(normalized);
+          return updated ?? row;
+        })
+        .sort((a, b) => a.sku.localeCompare(b.sku));
+
+      try {
+        await savePolicies(nextRowsSnapshot);
+        setPolicyRows(nextRowsSnapshot);
+        setStatus({
+          type: 'success',
+          text: `추천값을 ${totalApplied.toLocaleString()}건 적용했습니다.`,
+        });
+      } catch (error) {
+        saveErrorMessage =
+          error instanceof Error && error.message
+            ? error.message
+            : '정책 저장에 실패했습니다. 값은 화면에만 반영되었습니다.';
+        setPolicyRows(nextRowsSnapshot);
+        setStatus({ type: 'error', text: saveErrorMessage });
+      }
+    } else if (failed.length === 0) {
+      setStatus({ type: 'error', text: '적용 가능한 추천값을 찾지 못했습니다.' });
+    }
+
+    setBulkSummary({
+      total: targetSkus.length,
+      applied: totalApplied,
+      skipped,
+      failed,
+    });
+
+    if (saveErrorMessage) {
+      console.error('[policy] bulk apply save failed', saveErrorMessage);
+    }
+
+    setBulkApplying(false);
+    setBulkProgress(null);
+  }, [
+    bulkApplying,
+    bulkOptions,
+    handleForecastRecommendation,
+    isSearchFiltering,
+    onPersistedSkusChange,
+    policyRows,
+    productBySku,
+    registeredRows,
+    savePolicies,
+    setPolicyRows,
+    setStatus,
+  ]);
 
   const handlePolicyEwma = useCallback(
     async (targetSku: string, _alphaHint: number | null) => {
@@ -2114,6 +2783,7 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
     },
     [policyRows],
   );
+
 
   useEffect(() => {
     if (!forecastCache || Object.keys(forecastCache).length === 0) {
@@ -2193,8 +2863,9 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
         ),
       );
       markManualOverride(sku);
+      addManualSku(sku);
     },
-    [canInteract, markManualOverride, setPolicyRows],
+    [addManualSku, canInteract, markManualOverride, setPolicyRows],
   );
 
   const handleEditPolicy = useCallback(
@@ -2236,9 +2907,10 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
           .map(normalizePolicyRow),
       );
       manualOverrideRef.current.delete(normalizedSku);
+      removeManualSku(normalizedSku);
       setStatus({ type: 'success', text: `${sku} 정책이 삭제 목록에 추가되었습니다.` });
     },
-    [canInteract, productBySku, setPolicyRows, setStatus],
+    [canInteract, productBySku, removeManualSku, setPolicyRows, setStatus],
   );
 
   const openAddPolicyDialog = useCallback(() => {
@@ -2284,9 +2956,80 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
       });
 
       manualOverrideRef.current.delete(normalizedSku);
+      removeManualSku(normalizedSku);
       setStatus({ type: 'success', text: `${normalizedSku} 정책을 추가했습니다.` });
     },
-    [forecastCache, saving, setPolicyRows, setStatus],
+    [forecastCache, removeManualSku, saving, setPolicyRows, setStatus],
+  );
+
+  const handleAutoSaveRecommendation = useCallback(
+    async (
+      sku: string,
+      nextValues: {
+        forecastDemand: number | null;
+        demandStdDev: number | null;
+        leadTimeDays: number | null;
+        serviceLevelPercent: number | null;
+      },
+    ) => {
+      const normalizedSku = normalizeSku(sku);
+      let resolvedRow: PolicyRow | null = null;
+
+      setPolicyRows((prev) => {
+        const previous = prev.find((row) => normalizeSku(row.sku) === normalizedSku);
+        const product = productBySku.get(normalizedSku);
+        const baseRow: PolicyRow =
+          previous ??
+          normalizePolicyRow({
+            sku: normalizedSku,
+            name: product?.name ?? null,
+            forecastDemand: null,
+            demandStdDev: null,
+            leadTimeDays: null,
+            serviceLevelPercent: null,
+            smoothingAlpha: FALLBACK_SMOOTHING_ALPHA,
+            corrRho: FALLBACK_CORRELATION_RHO,
+          });
+
+        const nextRow: PolicyRow = normalizePolicyRow({
+          ...baseRow,
+          ...nextValues,
+          sku: normalizedSku,
+        });
+        resolvedRow = nextRow;
+
+        const nextList = previous
+          ? prev.map((row) => (normalizeSku(row.sku) === normalizedSku ? nextRow : row))
+          : [...prev, nextRow];
+        nextList.sort((a, b) => a.sku.localeCompare(b.sku));
+        return nextList;
+      });
+
+      if (!resolvedRow) {
+        throw new Error('추천값을 적용할 정책을 찾지 못했습니다.');
+      }
+
+      manualOverrideRef.current.add(normalizedSku);
+
+      try {
+        await upsertPolicy(resolvedRow);
+        if (resolvedRow) {
+          addManualSku(resolvedRow.sku);
+        }
+        setStatus({ type: 'success', text: `${resolvedRow.sku} 정책을 자동 저장했습니다.` });
+      } catch (error) {
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : '추천값을 자동 저장하지 못했습니다. 다시 시도해 주세요.';
+        setStatus({ type: 'error', text: message });
+        if (error instanceof Error) {
+          throw error;
+        }
+        throw new Error(message);
+      }
+    },
+    [addManualSku, productBySku, setPolicyRows, setStatus],
   );
 
   const handleSavePolicies = useCallback(async () => {
@@ -2350,12 +3093,7 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
           return merged;
         });
 
-        const effectiveRows = resolvedRows ?? policyRows;
-        onPersistedSkusChange?.(
-          sorted.length > 0 ? sorted.map((row) => row.sku) : effectiveRows.map((row) => row.sku),
-        );
       } catch {
-        onPersistedSkusChange?.(sortedRows.map((row) => row.sku));
       }
       setStatus({
         type: 'success',
@@ -2476,7 +3214,9 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
               {registeredRows.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-12 text-center text-slate-500">
-                    조건에 맞는 정책이 없습니다.
+                    {productBySku.size === 0
+                      ? '상품 데이터를 불러오는 중입니다. 상품관리에 등록된 품목만 표시됩니다.'
+                      : '조건에 맞는 정책이 없습니다.'}
                   </td>
                 </tr>
               ) : (
@@ -2484,12 +3224,16 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
                   const normalizedSku = normalizeSku(row.sku);
                   const product = productBySku.get(normalizedSku);
 
+                  if (!product) {
+                    return null;
+                  }
+
                   return (
                     <tr key={row.sku} className="border-b border-slate-100 last:border-transparent">
                       <td className="px-3 py-3 align-top">
-                        <div className="font-semibold text-slate-900">{product?.name ?? '미등록 품목'}</div>
+                        <div className="font-semibold text-slate-900">{product.name}</div>
                         <div className="text-[11px] text-slate-500">
-                          {product?.category ?? '카테고리 없음'} · {product?.subCategory ?? '세부 없음'}
+                          {product.category ?? '카테고리 없음'} · {product.subCategory ?? '세부 없음'}
                         </div>
                       </td>
                       <td className="px-3 py-3 align-top font-mono text-xs text-slate-500">{row.sku}</td>
@@ -2550,6 +3294,14 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
         <div className="mt-6 flex justify-end border-t border-slate-100 pt-4">
           <button
             type="button"
+            className="mr-2 inline-flex items-center justify-center rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-indigo-300 hover:text-indigo-600 disabled:cursor-not-allowed disabled:border-slate-100 disabled:text-slate-400"
+            onClick={openBulkApplyDialog}
+            disabled={saving || !canInteract || bulkApplying}
+          >
+            전체 추천값 일괄 적용
+          </button>
+          <button
+            type="button"
             className="inline-flex items-center justify-center rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-slate-300"
             onClick={handleSavePolicies}
             disabled={saving || !canInteract}
@@ -2558,12 +3310,26 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
           </button>
         </div>
       </Card>
+
       <PolicyCreateDialog
         open={addDialogOpen}
         onClose={closeAddPolicyDialog}
         products={allProducts}
         existingSkus={existingSkuSet}
         onSubmit={handlePolicyCreate}
+      />
+      <BulkApplyDialog
+        open={bulkDialogOpen}
+        options={bulkOptions}
+        targetCount={bulkTargetCount}
+        targetContext={bulkTargetContext}
+        applying={bulkApplying}
+        progress={bulkProgress}
+        summary={bulkSummary}
+        onClose={closeBulkApplyDialog}
+        onConfirm={handleBulkApplyConfirm}
+        onOptionChange={handleBulkOptionChange}
+        disabled={!canInteract}
       />
       {editOpen && editSku && (
         <PolicyEditDialog
@@ -2601,12 +3367,14 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
               ),
             );
             markManualOverride(editSku);
+            addManualSku(editSku);
             setStatus({ type: 'success', text: `${editSku} 정책을 수정했습니다.` });
             setEditOpen(false);
             setEditSku(null);
           }}
           onRecommend={handleForecastRecommendation}
           onApplyEwma={handlePolicyEwma}
+          onAutoSave={(next) => handleAutoSaveRecommendation(editSku, next)}
         />
       )}
     </div>
@@ -2614,15 +3382,8 @@ const PoliciesPage: React.FC<PoliciesPageProps> = ({
 };
 
 const DeepflowDashboard: React.FC = () => {
-  const [active, setActive] = useState<
-    | 'inventory'
-    | 'forecast'
-    | 'products'
-    | 'policies'
-    | 'warehouses'
-    | 'partners'
-    | 'categories'
-  >('inventory');
+  const outletContext = useOutletContext<SmartWarehouseOutletContext>();
+  const active = outletContext?.active ?? DEFAULT_DASHBOARD_TAB;
   const mountedRef = useRef(true);
   const initialPolicyRows = useMemo(() => readPolicyDraftBackup(), []);
   const [warehousePanelRefreshToken, setWarehousePanelRefreshToken] = useState(0);
@@ -2640,7 +3401,7 @@ const DeepflowDashboard: React.FC = () => {
   const [policyLoadError, setPolicyLoadError] = useState<string | null>(null);
   const [policyReady, setPolicyReady] = useState(false);
   const [persistedPolicySkus, setPersistedPolicySkus] = useState<string[]>(() =>
-    initialPolicyRows.map((row) => row.sku),
+    readManualSkuBackup(),
   );
   const [forecastState, setForecastState] = useState<Record<number, ForecastStateEntry>>({});
   const [productDrawer, setProductDrawer] = useState<ProductDrawerState | null>(null);
@@ -2734,9 +3495,6 @@ const DeepflowDashboard: React.FC = () => {
         next.sort((a, b) => a.sku.localeCompare(b.sku));
         return next;
       });
-      setPersistedPolicySkus(
-        sorted.length > 0 ? sorted.map((row) => row.sku) : backupRows.map((row) => row.sku),
-      );
     } catch (error) {
       if (!mountedRef.current) {
         return;
@@ -2752,9 +3510,6 @@ const DeepflowDashboard: React.FC = () => {
       );
       if (backupRows.length > 0) {
         setPolicyRows((prev) => (prev.length === 0 ? backupRows : prev.map(normalizePolicyRow)));
-        setPersistedPolicySkus(backupRows.map((row) => row.sku));
-      } else {
-        setPersistedPolicySkus([]);
       }
     } finally {
       if (mountedRef.current) {
@@ -2762,7 +3517,7 @@ const DeepflowDashboard: React.FC = () => {
         setPolicyReady(true);
       }
     }
-  }, [setPolicyRows, setPersistedPolicySkus, setPolicyLoadError, setPolicyLoading, setPolicyReady]);
+  }, [setPolicyRows, setPolicyLoadError, setPolicyLoading, setPolicyReady]);
 
   useEffect(() => {
     void loadPolicies();
@@ -2774,6 +3529,10 @@ const DeepflowDashboard: React.FC = () => {
     }
     writePolicyDraftBackup(policyRows);
   }, [policyReady, policyRows]);
+
+  useEffect(() => {
+    writeManualSkuBackup(persistedPolicySkus);
+  }, [persistedPolicySkus]);
 
   const handleReloadPolicies = useCallback(() => {
     if (policyLoading) {
@@ -3168,30 +3927,29 @@ const DeepflowDashboard: React.FC = () => {
       return;
     }
 
-    const normalizedRows = nextRows.map((row) =>
-      normalizePolicyRow({
-        ...row,
-        sku: normalizeSku(row.sku),
-      }),
-    );
+      const normalizedRows = nextRows.map((row) =>
+        normalizePolicyRow({
+          ...row,
+          sku: normalizeSku(row.sku),
+        }),
+      );
 
-    const distinctRows = Array.from(
-      new Map(normalizedRows.map((row) => [normalizeSku(row.sku), row])).values(),
-    ).sort((a, b) => a.sku.localeCompare(b.sku));
+      const distinctRows = Array.from(
+        new Map(normalizedRows.map((row) => [normalizeSku(row.sku), row])).values(),
+      ).sort((a, b) => a.sku.localeCompare(b.sku));
 
-    setPolicyRows(distinctRows);
-    setPersistedPolicySkus(distinctRows.map((row) => row.sku));
+      setPolicyRows(distinctRows);
 
-    void (async () => {
-      try {
-        await savePolicies(distinctRows.map(normalizePolicyRow));
-        setPolicyLoadError(null);
-      } catch (error) {
-        console.error('[deepflow] policy auto-draft sync failed', error);
-        setPolicyLoadError('정책 자동 생성 결과를 저장하지 못했습니다. 다시 시도해 주세요.');
-      }
-    })();
-  }, [allProducts, catalogReady, forecastCache, policyReady, policyRows, setPersistedPolicySkus, setPolicyLoadError, setPolicyRows]);
+      void (async () => {
+        try {
+          await savePolicies(distinctRows.map(normalizePolicyRow));
+          setPolicyLoadError(null);
+        } catch (error) {
+          console.error('[deepflow] policy auto-draft sync failed', error);
+          setPolicyLoadError('정책 자동 생성 결과를 저장하지 못했습니다. 다시 시도해 주세요.');
+        }
+      })();
+    }, [allProducts, catalogReady, forecastCache, policyReady, policyRows, setPolicyLoadError, setPolicyRows]);
 
   const forecastStatusBySku = useMemo<Record<string, ForecastStateEntry>>(() => {
     const map: Record<string, ForecastStateEntry> = {};
@@ -3295,7 +4053,9 @@ const DeepflowDashboard: React.FC = () => {
         });
         try {
           await savePolicies(nextPolicyDrafts);
-          setPersistedPolicySkus(nextPolicyDrafts.map((entry) => entry.sku));
+          setPersistedPolicySkus((prev) =>
+            prev.filter((sku) => normalizeSku(sku) !== normalizedSku),
+          );
           setPolicyLoadError(null);
         } catch (error) {
           console.error('[deepflow] policy sync failed after product deletion', error);
@@ -3473,25 +4233,9 @@ const DeepflowDashboard: React.FC = () => {
     }
   }, [closeProduct, productDeleting, productDrawer, triggerProductsReload]);
 
-  return (
-    <div className="min-h-screen w-full bg-gradient-to-br from-indigo-100 via-white to-sky-100 text-slate-900">
-      <div className="flex min-h-screen w-full flex-col px-4 py-10 sm:px-6 lg:px-10 xl:px-12">
-        <div className="flex flex-1 gap-6 rounded-[32px] bg-white/40 p-6 shadow-[0_30px_80px_-40px_rgba(15,23,42,0.65)] backdrop-blur-2xl ring-1 ring-white/60">
-          <aside className="flex w-72 flex-col rounded-3xl bg-white/70 p-6 text-sm shadow-xl ring-1 ring-white/70 backdrop-blur-xl">
-            <div className="mb-6 text-lg font-semibold text-indigo-950/80">스마트창고</div>
-            <nav className="flex-1 space-y-2">
-              <NavItem label="수요예측" active={active === 'forecast'} onClick={() => setActive('forecast')} />
-              <NavItem label="재고관리" active={active === 'inventory'} onClick={() => setActive('inventory')} />
-              <NavItem label="품목관리" active={active === 'products'} onClick={() => setActive('products')} />
-              <NavItem label="카테고리 수정" active={active === 'categories'} onClick={() => setActive('categories')} />
-              <NavItem label="창고관리" active={active === 'warehouses'} onClick={() => setActive('warehouses')} />
-              <NavItem label="거래처관리" active={active === 'partners'} onClick={() => setActive('partners')} />
-              <NavItem label="예측기준관리" active={active === 'policies'} onClick={() => setActive('policies')} />
-            </nav>
-          </aside>
 
-          <main className="flex flex-1 flex-col overflow-hidden rounded-[28px] bg-white/70 shadow-xl ring-1 ring-white/70 backdrop-blur-xl">
-            <div className="flex-1 overflow-y-auto px-8 pb-10">
+  return (
+    <>
               {active === 'inventory' && (
                 <InventoryOverviewPage
                   skus={skus}
@@ -3550,6 +4294,11 @@ const DeepflowDashboard: React.FC = () => {
                 />
               )}
 
+              {active === 'policyOps' && <PolicyOpsDashboard products={allProducts} />}
+
+              {active === 'purchase' && <PurchasePage />}
+              {active === 'sales' && <SalesPage />}
+
               {active === 'warehouses' && (
                 <WarehouseManagementPanel
                   refreshToken={warehousePanelRefreshToken}
@@ -3560,94 +4309,92 @@ const DeepflowDashboard: React.FC = () => {
               {active === 'categories' && <CategoryManagementPanel />}
 
               {active === 'partners' && <PartnerManagementPanel />}
-            </div>
-          </main>
-        </div>
-      </div>
 
-      <ProductCsvUploadDialog
-        open={csvDialogOpen}
-        onClose={handleCsvDialogClose}
-        onCompleted={handleCsvCompleted}
-      />
-
-      {productDrawer && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4 py-8"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="deepflow-product-modal-title"
-          onClick={closeProduct}
-        >
-          <div
-            className="w-full max-w-3xl overflow-hidden rounded-3xl bg-white shadow-2xl ring-1 ring-slate-200"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="flex items-start justify-between border-b border-slate-100 px-6 py-4">
-              <div>
-                <h3 id="deepflow-product-modal-title" className="text-lg font-semibold text-slate-900">
-                  {productDrawer.mode === 'new' ? '품목 등록' : '품목 수정'}
-                </h3>
-                <p className="mt-1 text-xs text-slate-500">
-                  SKU {productDrawer.originalSku?.trim() || productDrawer.row.sku.trim() || '신규'}
-                </p>
-              </div>
-              <button
-                type="button"
-                className="rounded-full p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
-                onClick={closeProduct}
-                aria-label="품목 편집 닫기"
-              >
-                닫기
-              </button>
-            </div>
-            <div className="max-h-[70vh] overflow-y-auto px-6 py-4">
-              <ProductForm
-                row={productDrawer.row}
-                onChange={(row) => setProductDrawer({ ...productDrawer, row })}
-                existingSkus={skus
-                  .map((item) => item.sku)
-                  .filter((sku) => sku !== (productDrawer.originalSku ?? ''))}
+              <ProductCsvUploadDialog
+                open={csvDialogOpen}
+                onClose={handleCsvDialogClose}
+                onCompleted={handleCsvCompleted}
               />
-              {productActionError && (
-                <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
-                  {productActionError}
+
+              {productDrawer && (
+                <div
+                  className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4 py-8"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="deepflow-product-modal-title"
+                  onClick={closeProduct}
+                >
+                  <div
+                    className="w-full max-w-3xl overflow-hidden rounded-3xl bg-white shadow-2xl ring-1 ring-slate-200"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <div className="flex items-start justify-between border-b border-slate-100 px-6 py-4">
+                      <div>
+                        <h3 id="deepflow-product-modal-title" className="text-lg font-semibold text-slate-900">
+                          {productDrawer.mode === 'new' ? '품목 등록' : '품목 수정'}
+                        </h3>
+                        <p className="mt-1 text-xs text-slate-500">
+                          SKU {productDrawer.originalSku?.trim() || productDrawer.row.sku.trim() || '신규'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="rounded-full p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                        onClick={closeProduct}
+                        aria-label="품목 편집 닫기"
+                      >
+                        닫기
+                      </button>
+                    </div>
+                    <div className="max-h-[70vh] overflow-y-auto px-6 py-4">
+                      <ProductForm
+                        row={productDrawer.row}
+                        onChange={(row) => setProductDrawer({ ...productDrawer, row })}
+                        existingSkus={skus
+                          .map((item) => item.sku)
+                          .filter((sku) => sku !== (productDrawer.originalSku ?? ''))}
+                      />
+                      {productActionError && (
+                        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
+                          {productActionError}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2 border-t border-slate-100 px-6 py-4 text-sm">
+                      <button
+                        type="button"
+                        className="rounded-xl border border-slate-200 px-3 py-2 text-slate-600 transition hover:bg-slate-50 disabled:opacity-60"
+                        onClick={closeProduct}
+                        disabled={productSaving || productDeleting}
+                      >
+                        취소
+                      </button>
+                      {productDrawer.mode === 'edit' && (
+                        <button
+                          type="button"
+                          className="rounded-xl border border-rose-200 px-3 py-2 text-rose-600 transition hover:bg-rose-50 disabled:opacity-60"
+                          onClick={deleteProduct}
+                          disabled={productSaving || productDeleting}
+                        >
+                          {productDeleting ? '삭제 중...' : '삭제'}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="rounded-xl bg-indigo-600 px-3 py-2 font-medium text-white transition hover:bg-indigo-500 disabled:opacity-60"
+                        onClick={saveProduct}
+                        disabled={productSaving}
+                      >
+                        {productSaving ? '저장 중...' : productDrawer.mode === 'new' ? '등록' : '저장'}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
-            </div>
-            <div className="flex flex-wrap gap-2 border-t border-slate-100 px-6 py-4 text-sm">
-              <button
-                type="button"
-                className="rounded-xl border border-slate-200 px-3 py-2 text-slate-600 transition hover:bg-slate-50 disabled:opacity-60"
-                onClick={closeProduct}
-                disabled={productSaving || productDeleting}
-              >
-                취소
-              </button>
-              {productDrawer.mode === 'edit' && (
-                <button
-                  type="button"
-                  className="rounded-xl border border-rose-200 px-3 py-2 text-rose-600 transition hover:bg-rose-50 disabled:opacity-60"
-                  onClick={deleteProduct}
-                  disabled={productSaving || productDeleting}
-                >
-                  {productDeleting ? '삭제 중...' : '삭제'}
-                </button>
-              )}
-              <button
-                type="button"
-                className="rounded-xl bg-indigo-600 px-3 py-2 font-medium text-white transition hover:bg-indigo-500 disabled:opacity-60"
-                onClick={saveProduct}
-                disabled={productSaving}
-              >
-                {productSaving ? '저장 중...' : productDrawer.mode === 'new' ? '등록' : '저장'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+
+    </>
   );
+
 };
 
 const ForecastPage: React.FC<ForecastPageProps> = ({
@@ -3661,7 +4408,10 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
   const [mode, setMode] = useState<'perSku' | 'overall'>('perSku');
   const [selectedSku, setSelectedSku] = useState<string | null>(skus[0]?.sku ?? null);
   const [chartWindowMonths, setChartWindowMonths] = useState<ChartWindowMonths>(12);
+  const [chartGranularity, setChartGranularity] = useState<ChartGranularity>('month');
   const [insightsState, setInsightsState] = useState<Record<string, InsightStateEntry>>({});
+  const [actionPlanSubmitting, setActionPlanSubmitting] = useState(false);
+  const [actionPlanApproving, setActionPlanApproving] = useState(false);
 
   useEffect(() => {
     if (skus.length === 0) {
@@ -3796,13 +4546,87 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
     return { chartData: toChartData(effective), visibleSeries: effective };
   }, [anchorSku, chartWindowMonths, mode, selectedSku, seriesMap, skus]);
 
+  const anchorForecast = anchorSku ? forecastCache[anchorSku] : undefined;
+  const anchorStatus = anchorSku ? forecastStatusBySku[anchorSku] : undefined;
+
   const adjustedForecastRange = useMemo(
     () => adjustForecastRange(forecastRange, chartData),
     [forecastRange, chartData],
   );
 
-  const anchorForecast = anchorSku ? forecastCache[anchorSku] : undefined;
-  const anchorStatus = anchorSku ? forecastStatusBySku[anchorSku] : undefined;
+  const weeklyChartData = useMemo(() => {
+    if (!anchorForecast?.weeklyForecast?.timeline?.length) {
+      return [];
+    }
+
+    const weeklySeries: ForecastSeriesPoint[] = anchorForecast.weeklyForecast.timeline.map((point) => ({
+      date: point.weekStart,
+      isoDate: point.weekStart,
+      actual: Number.isFinite(point.actual ?? Number.NaN) ? Math.round(point.actual ?? 0) : null,
+      fc: Math.round(point.forecast ?? 0),
+      phase: point.phase,
+      promo: point.promo ?? false,
+    }));
+
+    const filtered = filterSeriesByMonths(weeklySeries, chartWindowMonths);
+    return filtered.map((point) => {
+      const source = point.isoDate ?? point.date;
+      const epoch = parseIsoToUtcEpoch(source);
+      return {
+        date: point.date,
+        isoDate: point.isoDate,
+        ts: epoch ?? undefined,
+        actual: point.actual,
+        fc: point.fc,
+        forecast: point.fc,
+        phase: point.phase,
+        isFinal: point.phase !== 'forecast',
+      };
+    });
+  }, [anchorForecast, chartWindowMonths]);
+
+  const accuracyBadge = useMemo(() => {
+    if (!anchorForecast?.timeline?.length) {
+      return null;
+    }
+    const historyPoints = anchorForecast.timeline.filter(
+      (point) => point.phase === 'history' && typeof point.actual === 'number' && Number.isFinite(point.actual),
+    );
+    if (historyPoints.length === 0) {
+      return null;
+    }
+
+    let absErrorSum = 0;
+    let actualSum = 0;
+    let biasSum = 0;
+    let coverageHit = 0;
+    let coverageTotal = 0;
+
+    historyPoints.forEach((point) => {
+      const actual = typeof point.actual === 'number' ? point.actual : 0;
+      const forecastValue = Number.isFinite(point.forecast) ? point.forecast : 0;
+      absErrorSum += Math.abs(actual - forecastValue);
+      actualSum += Math.abs(actual);
+      biasSum += forecastValue - actual;
+
+      if (Number.isFinite(point.lower) && Number.isFinite(point.upper)) {
+        coverageTotal += 1;
+        if (actual >= point.lower && actual <= point.upper) {
+          coverageHit += 1;
+        }
+      }
+    });
+
+    if (actualSum === 0) {
+      return null;
+    }
+
+    return {
+      wape: (absErrorSum / actualSum) * 100,
+      bias: (biasSum / actualSum) * 100,
+      coverage: coverageTotal > 0 ? (coverageHit / coverageTotal) * 100 : null,
+    };
+  }, [anchorForecast]);
   const anchorLoading = anchorStatus?.status === 'loading';
   const anchorError =
     anchorStatus?.status === 'error'
@@ -3835,7 +4659,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
     return null;
   }, [anchorForecast, activeProduct, resolvedMetrics]);
 
-  const actionPlans = useMemo<ActionPlanItem[]>(() => {
+  const fallbackActionPlanItems = useMemo<ActionPlanItem[]>(() => {
     if (!activeProduct || !resolvedMetrics) {
       return [];
     }
@@ -3914,7 +4738,11 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
 
     setInsightsState((prev) => ({
       ...prev,
-      [normalizedSku]: { status: 'loading', key: metricsKey },
+      [normalizedSku]: {
+        status: 'loading',
+        key: metricsKey,
+        actionPlan: prev[normalizedSku]?.actionPlan ?? null,
+      },
     }));
 
     void requestForecastInsight(productId, payload)
@@ -3926,6 +4754,8 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
             key: metricsKey,
             data: response.insight,
             error: response.error ?? null,
+            actionPlan: response.actionPlan ?? prev[normalizedSku]?.actionPlan ?? null,
+            planFetchedAt: Date.now(),
           },
         }));
       })
@@ -3940,6 +4770,7 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
             status: 'error',
             key: metricsKey,
             error: message,
+            actionPlan: existing?.actionPlan ?? null,
           },
         }));
       });
@@ -3963,30 +4794,120 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
       ? insightEntry.error ?? '인사이트를 불러오지 못했습니다.'
       : null;
   const insightNotice = insightEntry?.status === 'ready' ? insightEntry.error ?? null : null;
+  const resolvedActionPlan = insightEntry?.actionPlan ?? null;
 
-  const insightActionItems = useMemo<ActionPlanItem[]>(() => {
-    if (resolvedInsight?.recommendations?.length) {
-      return resolvedInsight.recommendations.map((item) => ({
-        id: item.id,
-        title: item.title,
-        description: item.description,
-        tone: item.tone,
-        metricLabel: item.metricLabel,
-      }));
+  useEffect(() => {
+    if (!anchorSku || !normalizedAnchorSku || !activeProduct) {
+      return;
     }
-    return actionPlans;
-  }, [resolvedInsight, actionPlans]);
+    if (resolvedActionPlan) {
+      return;
+    }
 
-  const chartLoading = anchorLoading && !anchorForecast && chartData.length === 0;
+    let cancelled = false;
+    void fetchLatestActionPlan({ sku: anchorSku, productId: activeProduct.legacyProductId }).then((plan) => {
+      if (cancelled || !plan) {
+        return;
+      }
+      setInsightsState((prev) => ({
+        ...prev,
+        [normalizedAnchorSku]: {
+          ...(prev[normalizedAnchorSku] ?? { status: 'idle' }),
+          actionPlan: plan,
+          planFetchedAt: Date.now(),
+        },
+      }));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [anchorSku, normalizedAnchorSku, activeProduct, resolvedActionPlan]);
+
+  const applyActionPlanUpdate = useCallback(
+    (plan: ActionPlanRecord) => {
+      const normalized = normalizeSku(plan.sku);
+      setInsightsState((prev) => ({
+        ...prev,
+        [normalized]: {
+          ...(prev[normalized] ?? { status: 'idle' }),
+          actionPlan: plan,
+          planFetchedAt: Date.now(),
+        },
+      }));
+    },
+    [setInsightsState],
+  );
+
+  const handleSubmitActionPlan = useCallback(
+    (planId: string) => {
+      if (actionPlanSubmitting) {
+        return;
+      }
+      setActionPlanSubmitting(true);
+      void submitActionPlan(planId)
+        .then((plan) => {
+          applyActionPlanUpdate(plan);
+        })
+        .catch((error) => {
+          console.error(error);
+          window.alert('실행 계획 검토 요청에 실패했습니다. 다시 시도해주세요.');
+        })
+        .finally(() => setActionPlanSubmitting(false));
+    },
+    [actionPlanSubmitting, applyActionPlanUpdate],
+  );
+
+  const handleApproveActionPlan = useCallback(
+    (planId: string) => {
+      if (actionPlanApproving) {
+        return;
+      }
+      setActionPlanApproving(true);
+      void approveActionPlan(planId)
+        .then((plan) => {
+          applyActionPlanUpdate(plan);
+        })
+        .catch((error) => {
+          console.error(error);
+          window.alert('실행 계획 승인에 실패했습니다. 다시 시도해주세요.');
+        })
+        .finally(() => setActionPlanApproving(false));
+    },
+    [actionPlanApproving, applyActionPlanUpdate],
+  );
+
+  const displayedChartData = chartGranularity === 'week' ? weeklyChartData : chartData;
+  const effectiveForecastRange = chartGranularity === 'week' ? null : adjustedForecastRange;
+
+  const chartLoading = anchorLoading && !anchorForecast && displayedChartData.length === 0;
   const panelLoading = anchorLoading && !anchorForecast && !resolvedMetrics;
+
+  const activeWindowOptions = chartGranularity === 'week' ? WEEK_WINDOW_OPTIONS : CHART_WINDOW_OPTIONS;
 
   const chartToolbar = (
     <div className="flex flex-wrap items-center gap-2 text-xs">
-      {CHART_WINDOW_OPTIONS.map((option) => {
+      <div className="inline-flex overflow-hidden rounded-full border border-slate-200 bg-white">
+        <button
+          type="button"
+          className={`px-3 py-1 font-semibold ${chartGranularity === 'month' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}
+          onClick={() => setChartGranularity('month')}
+        >
+          월별
+        </button>
+        <button
+          type="button"
+          className={`px-3 py-1 font-semibold ${chartGranularity === 'week' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}
+          onClick={() => setChartGranularity('week')}
+        >
+          주별
+        </button>
+      </div>
+      {activeWindowOptions.map((option) => {
         const isActive = chartWindowMonths === option.months;
         return (
           <button
-            key={option.months}
+            key={`${chartGranularity}-${option.months}`}
             type="button"
             className={`rounded-lg border px-3 py-1 transition ${
               isActive
@@ -4119,12 +5040,13 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
 
       <ForecastChartCard
         sku={anchorSku}
-        chartData={chartData}
-        forecastRange={adjustedForecastRange}
+        chartData={displayedChartData}
+        forecastRange={effectiveForecastRange}
         loading={chartLoading}
         error={anchorError}
         toolbar={chartToolbar}
         unit={activeProduct?.unit ?? 'EA'}
+        accuracy={accuracyBadge}
       >
         <ForecastInsightsSection
           sku={anchorSku}
@@ -4132,9 +5054,15 @@ const ForecastPage: React.FC<ForecastPageProps> = ({
           metrics={resolvedMetrics}
           insight={resolvedInsight}
           fallbackExplanation={resolvedExplanation}
-          actionItems={insightActionItems}
+          actionPlan={resolvedActionPlan}
+          fallbackActionItems={fallbackActionPlanItems}
           loading={panelLoading}
           insightLoading={insightLoading}
+          actionPlanLoading={!resolvedActionPlan && insightLoading}
+          actionPlanSubmitting={actionPlanSubmitting}
+          actionPlanApproving={actionPlanApproving}
+          onSubmitActionPlan={resolvedActionPlan ? handleSubmitActionPlan : undefined}
+          onApproveActionPlan={resolvedActionPlan ? handleApproveActionPlan : undefined}
           insightError={insightErrorMessage ?? anchorError ?? null}
           insightNotice={insightNotice}
         />

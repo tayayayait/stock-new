@@ -13,6 +13,8 @@ const formatIsoMonth = (date: Date): string => {
   return `${year}-${month}-01`;
 };
 
+const formatDateOnly = (date: Date): string => date.toISOString().slice(0, 10);
+
 const clampNumber = (value: number): number => {
   if (!Number.isFinite(value)) {
     return 0;
@@ -227,12 +229,12 @@ export function estimateStockoutDate(
     const pointDate = toUtcDate(point.date);
     if (consumptionDays <= 30) {
       const stockoutDate = new Date(pointDate.getTime() + Math.max(consumptionDays - 1, 0) * MS_PER_DAY);
-      return stockoutDate.toISOString();
+      return formatDateOnly(stockoutDate);
     }
     remaining -= monthlyDemand;
     if (remaining <= 0) {
       const stockoutDate = new Date(pointDate.getTime() + 29 * MS_PER_DAY);
-      return stockoutDate.toISOString();
+      return formatDateOnly(stockoutDate);
     }
   }
 

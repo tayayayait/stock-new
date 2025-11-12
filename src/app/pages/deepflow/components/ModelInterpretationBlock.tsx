@@ -42,6 +42,31 @@ const ModelInterpretationBlock: React.FC<ModelInterpretationBlockProps> = ({
           <p className="mt-1 text-xs text-slate-500">{sourceLabel}</p>
         </header>
         <p className="mt-3 text-xs leading-5 text-slate-600">{insight.summary}</p>
+        {insight.risks?.length ? (
+          <div className="mt-4">
+            <h5 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Upside / Downside Risk</h5>
+            <ul className="mt-2 space-y-2 text-xs">
+              {insight.risks.map((risk) => (
+                <li
+                  key={risk.id}
+                  className={`rounded-2xl border px-3 py-2 ${
+                    risk.side === 'downside'
+                      ? 'border-rose-200 bg-rose-50/80 text-rose-700'
+                      : 'border-emerald-200 bg-emerald-50/80 text-emerald-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 text-[11px] font-semibold">
+                    <span>{risk.side === 'downside' ? 'Downside' : 'Upside'} · {risk.driver}</span>
+                    <span className="text-slate-500">
+                      영향 {risk.impact.toUpperCase()} · 신뢰 {Math.round(risk.confidence * 100)}%
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-600">{risk.evidence}</p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {insight.drivers.length > 0 && (
           <div className="mt-4">
             <h5 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">주요 근거</h5>

@@ -11,6 +11,7 @@ import {
 } from '../../../services/orders';
 import { fetchProducts, type Product } from '../../../services/products';
 import NewOrderForm, { type NewOrderFormState, type OrderKind } from '../components/NewOrderForm';
+import OrderDetailModal from '../components/OrderDetailModal';
 import PartnerModal from '../components/PartnerModal';
 import QuickWarehouseModal from '../components/QuickWarehouseModal';
 import WarehouseTransferPanel from '../components/WarehouseTransferPanel';
@@ -100,6 +101,7 @@ const OrdersPage: React.FC = () => {
   const productCatalogRequestRef = React.useRef<Promise<Product[]> | null>(null);
   const [orderCreationSummary, setOrderCreationSummary] = React.useState<OrderCreationSummary | null>(null);
   const [isCompletionModalOpen, setCompletionModalOpen] = React.useState(false);
+  const [isDetailModalOpen, setDetailModalOpen] = React.useState(false);
   const pendingFormResetRef = React.useRef<(() => void) | null>(null);
 
   const loadPartners = React.useCallback(async () => {
@@ -406,16 +408,11 @@ const OrdersPage: React.FC = () => {
   );
 
   const handleViewOrderDetail = React.useCallback(() => {
-    if (!orderCreationSummary) {
-      return;
-    }
-    const path =
-      orderCreationSummary.orderKind === 'purchase'
-        ? `/orders/purchase/${orderCreationSummary.id}`
-        : `/orders/sales/${orderCreationSummary.id}`;
-    navigate(path);
-    handleCompletionModalDismiss();
-  }, [handleCompletionModalDismiss, navigate, orderCreationSummary]);
+    if (!orderCreationSummary) return;
+    // Open detail modal instead of navigating to route
+    setDetailModalOpen(true);
+    setCompletionModalOpen(false);
+  }, [orderCreationSummary]);
 
   const handlePartnerCreated = React.useCallback(
     async (_partner: Partner) => {
@@ -605,6 +602,19 @@ const OrdersPage: React.FC = () => {
           </div>
         ) : null}
       </Modal>
+
+      {/* Order detail modal (opened from completion modal) */}
+      {orderCreationSummary ? (
+        <OrderDetailModal
+          isOpen={isDetailModalOpen}
+          onClose={() => setDetailModalOpen(false)}
+          orderId={orderCreationSummary.id}
+          orderKind={orderCreationSummary.orderKind}
+          partners={partners}
+          products={productCatalog ?? undefined}
+          summary={orderCreationSummary}
+        />
+      ) : null}
     </div>
   );
 };

@@ -45,6 +45,7 @@ const buildLocation = (overrides: Partial<ApiLocation> = {}): ApiLocation => ({
   code: overrides.code ?? 'LOC-001',
   description: overrides.description ?? '랙 A1',
   warehouseCode: overrides.warehouseCode ?? 'WH-001',
+  notes: overrides.notes ?? null,
 });
 
 describe('WarehouseManagementPanel - 삭제 동작', () => {
@@ -153,7 +154,7 @@ describe('WarehouseManagementPanel - 수정 동작', () => {
   beforeEach(() => {
     warehousesData = [buildWarehouse({ notes: '창고 기본 메모' })];
     locationsData = {
-      'WH-001': [buildLocation({ description: '랙 A1 메모' })],
+      'WH-001': [buildLocation({ description: 'LOC-001', notes: '랙 A1 메모' })],
     } satisfies LocationMap;
 
     fetchWarehousesMock.mockReset();
@@ -187,6 +188,7 @@ describe('WarehouseManagementPanel - 수정 동작', () => {
             code: payload.code ?? location.code,
             description: payload.description ?? location.description,
             warehouseCode: payload.warehouseCode ?? location.warehouseCode,
+            notes: payload.notes ?? location.notes ?? null,
           } satisfies ApiLocation;
         });
       });
@@ -231,19 +233,21 @@ describe('WarehouseManagementPanel - 수정 동작', () => {
     await user.click(submitButton);
 
     await waitFor(() => {
-      expect(updateWarehouseMock).toHaveBeenCalledWith('WH-001', { name: '서울 센터 2' });
+      expect(updateWarehouseMock).toHaveBeenCalledWith('WH-001', {
+        name: '서울 센터 2',
+        notes: '창고 기본 메모',
+      });
       expect(updateLocationMock).toHaveBeenCalledWith('LOC-001', {
         warehouseCode: 'WH-001',
-        code: 'LOC-010',
-        description: '새로운 위치 메모',
+        code: 'LOC-001',
+        description: 'LOC-010',
+        notes: '새로운 위치 메모',
       });
     });
 
-    await waitFor(() => {
-      expect(fetchWarehousesMock).toHaveBeenCalledTimes(2);
-      expect(fetchLocationsMock.mock.calls.length).toBeGreaterThanOrEqual(2);
-    });
-    expect(onRequestReload).toHaveBeenCalled();
+    expect(fetchWarehousesMock).toHaveBeenCalledTimes(1);
+    expect(fetchLocationsMock).toHaveBeenCalledTimes(1);
+    expect(onRequestReload).not.toHaveBeenCalled();
 
     await waitFor(() => {
       expect(screen.queryByRole('heading', { name: '창고 정보 수정' })).not.toBeInTheDocument();
@@ -251,6 +255,50 @@ describe('WarehouseManagementPanel - 수정 동작', () => {
 
     await screen.findByText('LOC-010');
     await screen.findByText('새로운 위치 메모');
+  });
+
+  it('updates only the targeted location memo when warehouse fields are unchanged', async () => {
+    locationsData = {
+      'WH-001': [buildLocation({ description: 'LOC-001', notes: null })],
+    } satisfies LocationMap;
+
+    const user = userEvent.setup();
+    const onRequestReload = vi.fn();
+    render(<WarehouseManagementPanel refreshToken={0} onRequestReload={onRequestReload} />);
+
+    await screen.findByText('LOC-001');
+
+    const targetRow = screen.getByText('LOC-001').closest('tr');
+    expect(targetRow).not.toBeNull();
+    const editButton = within(targetRow as HTMLTableRowElement).getByRole('button', { name: '수정' });
+    await user.click(editButton);
+
+    await screen.findByRole('heading', { name: '창고 정보 수정' });
+    const memoInput = screen.getByLabelText('메모');
+    await user.clear(memoInput);
+    await user.type(memoInput, '행 전용 메모');
+
+    await user.click(screen.getByRole('button', { name: '저장' }));
+
+    await waitFor(() => {
+      expect(updateWarehouseMock).not.toHaveBeenCalled();
+      expect(updateLocationMock).toHaveBeenCalledWith('LOC-001', {
+        warehouseCode: 'WH-001',
+        code: 'LOC-001',
+        description: 'LOC-001',
+        notes: '행 전용 메모',
+      });
+    });
+
+    expect(fetchWarehousesMock).toHaveBeenCalledTimes(1);
+    expect(fetchLocationsMock).toHaveBeenCalledTimes(1);
+    expect(onRequestReload).not.toHaveBeenCalled();
+
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: '창고 정보 수정' })).not.toBeInTheDocument();
+    });
+
+    await screen.findByText('행 전용 메모');
   });
 
   it('disables detail location editing when the row has no location and updates warehouse notes', async () => {
@@ -289,10 +337,8 @@ describe('WarehouseManagementPanel - 수정 동작', () => {
     });
     expect(updateLocationMock).not.toHaveBeenCalled();
 
-    await waitFor(() => {
-      expect(fetchWarehousesMock).toHaveBeenCalledTimes(2);
-    });
-    expect(onRequestReload).toHaveBeenCalled();
+    expect(fetchWarehousesMock).toHaveBeenCalledTimes(1);
+    expect(onRequestReload).not.toHaveBeenCalled();
 
     await waitFor(() => {
       expect(screen.queryByRole('heading', { name: '창고 정보 수정' })).not.toBeInTheDocument();

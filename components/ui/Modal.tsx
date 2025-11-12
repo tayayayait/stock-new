@@ -7,6 +7,7 @@ interface ModalProps {
   onClose: () => void;
   title: string;
   children: ReactNode;
+  widthClassName?: string; // optional width override
 }
 
 const FOCUSABLE_SELECTORS =
@@ -18,7 +19,7 @@ const getFocusableElements = (container: HTMLElement) => {
   );
 };
 
-const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }) => {
+const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, widthClassName = 'max-w-lg' }) => {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedElementRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
@@ -102,7 +103,7 @@ const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }) => {
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="relative mx-auto w-full max-w-lg rounded-md border bg-white p-5 shadow-lg"
+        className={`relative mx-auto w-full ${widthClassName} rounded-md border bg-white p-5 shadow-lg`}
       >
         <div className="flex items-center justify-between border-b pb-3">
           <h3 id={titleId} className="text-2xl font-bold text-gray-900">

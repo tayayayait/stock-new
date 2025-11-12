@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useState } from "react";
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -23,6 +23,11 @@ import {
   type InventoryWarehouseItemsResponse,
   type InventoryWarehouseItem,
 } from "../../../../services/inventoryDashboard";
+import {
+  OVERSTOCK_RATE_LEGEND_STAGES,
+  type OverstockRateStageDefinition,
+  classifyOverstockRate,
+} from "./overstockRateStages";
 
 interface KpiSummary {
   opening: number;
@@ -77,6 +82,15 @@ const riskClassName: Record<InventoryRisk, string> = {
 const RISK_ORDER: InventoryRisk[] = [RISK_SHORTAGE, RISK_STABLE, RISK_OVERSTOCK];
 
 const calculateAvailableStock = (row: Product): number => Math.max(row.onHand - row.reserved, 0);
+
+const pickPositiveNumber = (...candidates: Array<number | null | undefined>): number => {
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
+      return candidate;
+    }
+  }
+  return 0;
+};
 
 const toDateInputValue = (date: Date): string =>
   `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
@@ -160,6 +174,121 @@ const RiskTag: React.FC<{ risk: InventoryRisk }> = ({ risk }) => (
     {riskDisplayLabel[risk] ?? risk}
   </span>
 );
+
+const formatOverstockRate = (value: number | null): string => {
+  if (!Number.isFinite(value as number)) {
+    return "데이터 없음";
+  }
+  const numeric = value as number;
+  return `${numeric.toFixed(1)}%`;
+};
+
+const OverstockRateBadge: React.FC<{ stage: OverstockRateStageDefinition }> = ({ stage }) => (
+  <span
+    className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${stage.badgeClassName}`}
+  >
+    {stage.shortLabel}
+  </span>
+);
+
+const OverstockRateInfoPanel: React.FC<{
+  currentRate: number | null;
+  stage: OverstockRateStageDefinition | null;
+}> = ({ currentRate, stage }) => (
+  <div className="space-y-3 text-xs text-slate-600">
+    <div className="rounded-xl bg-slate-50 p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">현재 초과재고율</div>
+      <div className="mt-1 flex items-center justify-between gap-2">
+        <span className="text-lg font-semibold text-slate-900">{formatOverstockRate(currentRate)}</span>
+        {stage ? <OverstockRateBadge stage={stage} /> : null}
+      </div>
+      <p className="mt-1 text-[11px] text-slate-500">
+        {stage ? stage.description : "데이터가 부족하여 단계 판별이 불가능합니다."}
+      </p>
+      {stage?.action ? <p className="mt-1 text-[11px] font-medium text-slate-600">{stage.action}</p> : null}
+    </div>
+
+    <div className="space-y-2">
+      {OVERSTOCK_RATE_LEGEND_STAGES.map((legendStage) => (
+        <div key={legendStage.key} className="rounded-xl border border-slate-100 p-2">
+          <div className="flex items-center justify-between text-[11px] font-semibold text-slate-700">
+            <span>{legendStage.rangeLabel}</span>
+            <OverstockRateBadge stage={legendStage} />
+          </div>
+          <p className="mt-1 text-[11px] text-slate-500">{legendStage.description}</p>
+          <p className="mt-1 text-[11px] font-medium text-slate-600">{legendStage.action}</p>
+        </div>
+      ))}
+    </div>
+
+    <p className="text-[11px] text-slate-500">
+      0% 미만 값은 안전재고에 미달된 부족 상태를 의미하므로 별도 shortage 지표와 함께 확인하세요.
+    </p>
+
+    <p className="text-[11px] text-slate-500">
+      안전재고가 0이면 서버는 0%로, 차트는 재고가 있을 경우 100%로 보정됩니다. 조직 정책에 맞춰 통일된 해석 규칙을 적용하세요.
+    </p>
+  </div>
+);
+
+const OverstockRateInspector: React.FC<{ currentRate: number | null }> = ({ currentRate }) => {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const stage = classifyOverstockRate(currentRate);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const handlePointer = (event: MouseEvent) => {
+      if (!containerRef.current) {
+        return;
+      }
+      if (containerRef.current.contains(event.target as Node)) {
+        return;
+      }
+      setOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointer);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointer);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className="relative flex items-center gap-2" ref={containerRef}>
+      {stage ? (
+        <OverstockRateBadge stage={stage} />
+      ) : (
+        <span className="text-[11px] font-medium text-slate-400">데이터 없음</span>
+      )}
+      <button
+        type="button"
+        className="rounded-full border border-slate-200 px-3 py-1 text-[11px] font-medium text-slate-600 transition hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-600"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        해석
+      </button>
+      {open ? (
+        <div className="absolute right-0 z-20 mt-2 w-80 rounded-2xl border border-slate-200 bg-white/95 p-4 text-xs text-slate-600 shadow-xl backdrop-blur">
+          <OverstockRateInfoPanel currentRate={currentRate} stage={stage} />
+        </div>
+      ) : null}
+    </div>
+  );
+};
 
 const InventoryOverviewPage: React.FC<InventoryOverviewPageProps> = ({
   skus,
@@ -312,16 +441,10 @@ const InventoryOverviewPage: React.FC<InventoryOverviewPageProps> = ({
   }, [chartSku, rangeFrom, rangeTo, selectedWarehouseCode]);
 
   useEffect(() => {
-    if (!selectedWarehouseCode) {
-      setWarehouseSnapshot(null);
-      setWarehouseSnapshotError(null);
-      setWarehouseSnapshotLoading(false);
-      return;
-    }
-
     if (!isValidRange(rangeFrom, rangeTo)) {
       setWarehouseSnapshot(null);
       setWarehouseSnapshotError("Invalid date range.");
+      setWarehouseSnapshotLoading(false);
       return;
     }
 
@@ -329,7 +452,11 @@ const InventoryOverviewPage: React.FC<InventoryOverviewPageProps> = ({
     setWarehouseSnapshotLoading(true);
     setWarehouseSnapshotError(null);
 
-    fetchInventoryWarehouseItems({ from: rangeFrom, to: rangeTo, warehouseCode: selectedWarehouseCode })
+    fetchInventoryWarehouseItems({
+      from: rangeFrom,
+      to: rangeTo,
+      warehouseCode: selectedWarehouseCode ?? undefined,
+    })
       .then((response) => {
         if (!cancelled) {
           setWarehouseSnapshot(response);
@@ -409,7 +536,8 @@ const InventoryOverviewPage: React.FC<InventoryOverviewPageProps> = ({
         const available = scoped ? scoped.available : calculateAvailableStock(product);
         const inbound = scoped ? scoped.inbound : product.totalInbound ?? 0;
         const outbound = scoped ? scoped.outbound : product.totalOutbound ?? 0;
-        const avgOutbound = scoped ? scoped.avgDailyOutbound : product.avgOutbound7d ?? 0;
+        const avgInbound = scoped?.avgDailyInbound ?? null;
+        const avgOutbound = scoped ? scoped.avgDailyOutbound : pickPositiveNumber(product.avgOutbound7d, product.dailyAvg);
 
         const policy = policyMap.get(product.sku.trim().toUpperCase());
         const policySigma = policy && Number.isFinite(policy.demandStdDev ?? NaN) ? Math.max(policy.demandStdDev as number, 0) : null;
@@ -435,6 +563,7 @@ const InventoryOverviewPage: React.FC<InventoryOverviewPageProps> = ({
           available,
           inbound,
           outbound,
+          avgDailyInbound: avgInbound,
           avgDailyOutbound: avgOutbound,
           safetyStock,
           stockoutEtaDays: etaDays,
@@ -520,6 +649,9 @@ const InventoryOverviewPage: React.FC<InventoryOverviewPageProps> = ({
       };
     });
   }, [analysis, hasWarehouseData]);
+
+  const latestOverstockRate =
+    overstockRateData.length > 0 ? overstockRateData[overstockRateData.length - 1].overstockRate : null;
 
   const analysisTotals = analysis?.totals ?? null;
 
@@ -664,10 +796,10 @@ const InventoryOverviewPage: React.FC<InventoryOverviewPageProps> = ({
             {warehouseSnapshotError}
           </div>
         )}
-        {warehouseSnapshotLoading && <div className="mb-3 text-xs text-slate-400">창고별 데이터를 불러오는 중입니다...</div>}
+        {warehouseSnapshotLoading && <div className="mb-3 text-xs text-slate-400">재고 데이터를 불러오는 중입니다...</div>}
         <div className="overflow-auto max-h-[420px] rounded-xl border">
           <table className="min-w-full text-sm">
-            <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500">
+            <thead className="sticky top-0 z-10 bg-slate-50 text-left text-xs uppercase text-slate-500 shadow-sm">
               <tr>
                 <th className="px-3 py-2">SKU</th>
                 <th className="px-3 py-2">상품명</th>
@@ -677,6 +809,7 @@ const InventoryOverviewPage: React.FC<InventoryOverviewPageProps> = ({
                 <th className="px-3 py-2 text-right">안전 재고</th>
                 <th className="px-3 py-2 text-right">기간 입고</th>
                 <th className="px-3 py-2 text-right">기간 출고</th>
+                <th className="px-3 py-2 text-right">일 평균 입고</th>
                 <th className="px-3 py-2 text-right">일 평균 출고</th>
                 <th className="px-3 py-2 text-right">재고소진예상일(YYYY-MM-DD)</th>
                 <th className="px-3 py-2 text-center">위험도</th>
@@ -712,6 +845,9 @@ const InventoryOverviewPage: React.FC<InventoryOverviewPageProps> = ({
                     <td className="px-3 py-2 text-right text-slate-700">{row.safetyStock.toLocaleString()}</td>
                     <td className="px-3 py-2 text-right text-slate-600">{row.inbound.toLocaleString()}</td>
                     <td className="px-3 py-2 text-right text-slate-600">{row.outbound.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">
+                      {row.avgDailyInbound ? row.avgDailyInbound.toFixed(1) : "—"}
+                    </td>
                     <td className="px-3 py-2 text-right text-slate-600">
                       {row.avgDailyOutbound ? row.avgDailyOutbound.toFixed(1) : "—"}
                     </td>
@@ -804,7 +940,11 @@ const InventoryOverviewPage: React.FC<InventoryOverviewPageProps> = ({
         </div>
       </Card>
 
-      <Card title="초과 재고율 추이" className="col-span-12 lg:col-span-6">
+      <Card
+        title="초과 재고율 추이"
+        className="col-span-12 lg:col-span-6"
+        actions={<OverstockRateInspector currentRate={latestOverstockRate} />}
+      >
         <div className="h-60">
           {overstockRateData.length === 0 ? (
             <div className="flex h-full items-center justify-center text-sm text-slate-400">

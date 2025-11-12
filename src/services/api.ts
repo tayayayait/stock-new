@@ -1,9 +1,22 @@
 import { emitInventoryRefreshEvent, type InventoryMovementLike } from '../app/utils/inventoryEvents';
 import { request as httpRequest, type HttpError, type RequestOptions } from './http';
+import type { ActionPlanRecord } from '@/shared/actionPlans/types';
 
 const FALLBACK_RELATIVE_BASE = '/api';
 
 const trimTrailingSlashes = (value: string) => value.replace(/\/+$/, '');
+const normalizeBaseSegment = (value: string): string => {
+  if (!value) {
+    return '';
+  }
+  const normalized = trimTrailingSlashes(value);
+  if (!normalized) {
+    return '';
+  }
+  return normalized.startsWith('/') ? normalized : `/${normalized}`;
+};
+
+const FALLBACK_BASE_SEGMENT = normalizeBaseSegment(FALLBACK_RELATIVE_BASE);
 
 const readViteEnv = () => {
   try {
@@ -21,18 +34,35 @@ const readViteEnv = () => {
 const resolveBaseURL = () => {
   const envUrl = (readViteEnv().VITE_API_URL ?? '').trim();
   if (envUrl) {
-    return trimTrailingSlashes(envUrl);
+    const normalizedEnvUrl = trimTrailingSlashes(envUrl);
+    if (isAbsoluteUrl(normalizedEnvUrl)) {
+      try {
+        const url = new URL(normalizedEnvUrl);
+        const normalizedPath = trimTrailingSlashes(url.pathname);
+        url.pathname = normalizedPath || FALLBACK_BASE_SEGMENT;
+        const query = url.search ?? '';
+        const candidate = `${url.origin}${trimTrailingSlashes(url.pathname)}${query}`;
+        return trimTrailingSlashes(candidate) || trimTrailingSlashes(`${url.origin}${FALLBACK_BASE_SEGMENT}`);
+      } catch {
+        // eslint-disable-next-line no-console
+        console.warn('[resolveBaseURL] Failed to parse VITE_API_URL, using raw value.');
+        return normalizedEnvUrl || FALLBACK_BASE_SEGMENT;
+      }
+    }
+
+    if (!normalizedEnvUrl || normalizedEnvUrl === '/') {
+      return FALLBACK_BASE_SEGMENT;
+    }
+
+    return normalizedEnvUrl;
   }
 
   if (typeof window !== 'undefined' && window.location?.origin) {
     const origin = trimTrailingSlashes(window.location.origin);
-    const fallbackBase = trimTrailingSlashes(
-      FALLBACK_RELATIVE_BASE.startsWith('/') ? FALLBACK_RELATIVE_BASE : `/${FALLBACK_RELATIVE_BASE}`,
-    );
-    return `${origin}${fallbackBase}`;
+    return `${origin}${FALLBACK_BASE_SEGMENT}`;
   }
 
-  return FALLBACK_RELATIVE_BASE;
+  return FALLBACK_BASE_SEGMENT || FALLBACK_RELATIVE_BASE;
 };
 
 const baseURL = resolveBaseURL();
@@ -172,6 +202,14 @@ export async function post<T>(path: string, body?: unknown, init?: ApiRequestIni
   });
 }
 
+export async function put<T>(path: string, body?: unknown, init?: ApiRequestInit): Promise<T> {
+  return request<T>(path, {
+    ...init,
+    method: 'PUT',
+    body: body === undefined ? init?.body : body,
+  });
+}
+
 export async function patch<T>(path: string, body?: unknown, init?: ApiRequestInit): Promise<T> {
   return post<T>(path, body, { ...init, method: 'PATCH' });
 }
@@ -225,6 +263,7 @@ export interface ApiLocation {
   code: string;
   description: string;
   warehouseCode: string;
+  notes?: string | null;
   warehouse?: ApiWarehouse | null;
   isActive?: boolean;
   createdAt?: string;
@@ -258,6 +297,7 @@ export interface CreateLocationPayload {
   code: string;
   warehouseCode: string;
   description?: string | null;
+  notes?: string | null;
 }
 
 const normalizeLocationPayload = (payload: CreateLocationPayload): CreateLocationPayload => {
@@ -271,6 +311,15 @@ const normalizeLocationPayload = (payload: CreateLocationPayload): CreateLocatio
       normalized.description = null;
     } else {
       normalized.description = payload.description.trim();
+    }
+  }
+
+  if (payload.notes !== undefined) {
+    if (payload.notes === null) {
+      normalized.notes = null;
+    } else {
+      const trimmed = payload.notes.trim();
+      normalized.notes = trimmed === '' ? null : trimmed;
     }
   }
 
@@ -408,10 +457,13 @@ export interface UpdateLocationPayload {
   code: string;
   warehouseCode: string;
   description: string;
+  notes?: string | null;
 }
 
 export async function updateLocation(locationCode: string, payload: UpdateLocationPayload) {
-  return post<ApiLocation>(`/api/locations/${encodeURIComponent(locationCode)}`, payload, { method: 'PUT' });
+  return post<ApiLocation>(`/api/locations/${encodeURIComponent(locationCode)}`, normalizeLocationPayload(payload), {
+    method: 'PUT',
+  });
 }
 
 export async function deleteLocation(locationCode: string) {
@@ -548,26 +600,30 @@ export interface ForecastExplanation {
   };
 }
 
-export interface ForecastInsightRecommendation {
+export interface ForecastRiskItem {
   id: string;
-  title: string;
-  description: string;
-  tone?: 'info' | 'warning' | 'success';
-  metricLabel?: string;
+  side: 'upside' | 'downside';
+  driver: string;
+  evidence: string;
+  impact: 'high' | 'medium' | 'low';
+  confidence: number;
 }
 
 export interface ForecastInsight {
   summary: string;
   drivers: string[];
   watchouts: string[];
-  recommendations: ForecastInsightRecommendation[];
+  risks: ForecastRiskItem[];
   generatedAt: string;
   source: 'llm' | 'fallback';
   rawText?: string;
+  language?: string;
+  version?: string;
 }
 
 export interface ForecastInsightResponseBody {
   insight: ForecastInsight;
+  actionPlan?: ActionPlanRecord | null;
   error?: string;
 }
 

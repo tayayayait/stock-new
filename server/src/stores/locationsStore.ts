@@ -7,6 +7,7 @@ export interface LocationPayload {
   code: string;
   warehouseCode: string;
   description: string;
+  notes?: string | null;
 }
 
 export interface LocationRecord extends LocationPayload {
@@ -78,10 +79,19 @@ const defaultLocations: LocationPayload[] = [
   },
 ];
 
+const normalizeNotes = (value: string | null | undefined): string | null => {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+};
+
 function toRecord(payload: LocationPayload): LocationRecord {
   const now = new Date().toISOString();
   return {
     ...payload,
+    notes: normalizeNotes(payload.notes),
     id: randomUUID(),
     createdAt: now,
     updatedAt: now,
@@ -175,7 +185,7 @@ export function findOrCreateLocation(warehouseCode: string, description: string)
 
 export function updateLocation(
   code: string,
-  changes: Pick<LocationPayload, 'warehouseCode' | 'description'>,
+  changes: Pick<LocationPayload, 'warehouseCode' | 'description'> & { notes?: string | null },
 ): LocationRecord {
   ensureLocationSeedData();
   const existing = locationStore.get(code);
@@ -192,6 +202,7 @@ export function updateLocation(
   const updated: LocationRecord = {
     ...existing,
     ...changes,
+    notes: changes.notes === undefined ? existing.notes ?? null : normalizeNotes(changes.notes),
     updatedAt: new Date().toISOString(),
   };
   locationStore.set(code, updated);
@@ -216,6 +227,7 @@ export function renameLocation(oldCode: string, payload: LocationPayload): Locat
   const updated: LocationRecord = {
     ...existing,
     ...payload,
+    notes: payload.notes === undefined ? existing.notes ?? null : normalizeNotes(payload.notes),
     updatedAt: new Date().toISOString(),
   };
 
@@ -264,5 +276,3 @@ export function __resetLocationStore(seed = readSeedPreference()): void {
 export function __getLocationRecords(): LocationRecord[] {
   return listLocations();
 }
-
-

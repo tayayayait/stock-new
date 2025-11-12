@@ -1,7 +1,7 @@
 [
   {
-    "sku": "CHE-011",
-    "name": "공업용 윤활유 20L",
+    "sku": "SAF-001",
+    "name": "산업용 장갑 NBR-500",
     "forecastDemand": 0,
     "demandStdDev": 0,
     "leadTimeDays": 14,
@@ -10,18 +10,8 @@
     "corrRho": 0.25
   },
   {
-    "sku": "CHE-012",
-    "name": "세정제 IPA 1L",
-    "forecastDemand": 1,
-    "demandStdDev": 10,
-    "leadTimeDays": 14,
-    "serviceLevelPercent": 95,
-    "smoothingAlpha": 0.4,
-    "corrRho": 0.25
-  },
-  {
-    "sku": "FAC-016",
-    "name": "공장용 형광등 T5 36W",
+    "sku": "SAF-002",
+    "name": "안전모 A형 ABS",
     "forecastDemand": 0,
     "demandStdDev": 0,
     "leadTimeDays": 14,
@@ -30,8 +20,8 @@
     "corrRho": 0.25
   },
   {
-    "sku": "FAC-017",
-    "name": "산업용 청소포 100매",
+    "sku": "SAF-003",
+    "name": "귀마개 폼타입 100EA",
     "forecastDemand": 0,
     "demandStdDev": 0,
     "leadTimeDays": 14,
@@ -40,8 +30,8 @@
     "corrRho": 0.25
   },
   {
-    "sku": "FAC-018",
-    "name": "스테인리스 작업대 1200mm",
+    "sku": "SAF-004",
+    "name": "방진마스크 KF94",
     "forecastDemand": 0,
     "demandStdDev": 0,
     "leadTimeDays": 14,
@@ -50,18 +40,8 @@
     "corrRho": 0.25
   },
   {
-    "sku": "FAC-019",
-    "name": "파렛트(플라스틱) 1100x1100",
-    "forecastDemand": 0,
-    "demandStdDev": 0,
-    "leadTimeDays": 14,
-    "serviceLevelPercent": 95,
-    "smoothingAlpha": 0.4,
-    "corrRho": 0.25
-  },
-  {
-    "sku": "FAC-020",
-    "name": "포장용 스트레치필름 500mm",
+    "sku": "SAF-005",
+    "name": "절연장갑 500V",
     "forecastDemand": 0,
     "demandStdDev": 0,
     "leadTimeDays": 14,
@@ -120,6 +100,26 @@
     "corrRho": 0.25
   },
   {
+    "sku": "CHE-011",
+    "name": "공업용 윤활유 20L",
+    "forecastDemand": 0,
+    "demandStdDev": 0,
+    "leadTimeDays": 14,
+    "serviceLevelPercent": 95,
+    "smoothingAlpha": 0.4,
+    "corrRho": 0.25
+  },
+  {
+    "sku": "CHE-012",
+    "name": "세정제 IPA 1L",
+    "forecastDemand": 0,
+    "demandStdDev": 0,
+    "leadTimeDays": 14,
+    "serviceLevelPercent": 95,
+    "smoothingAlpha": 0.4,
+    "corrRho": 0.25
+  },
+  {
     "sku": "OFF-013",
     "name": "라벨 프린터기 LP-320",
     "forecastDemand": 0,
@@ -150,8 +150,8 @@
     "corrRho": 0.25
   },
   {
-    "sku": "SAF-001",
-    "name": "산업용 장갑 NBR-500",
+    "sku": "FAC-016",
+    "name": "공장용 형광등 T5 36W",
     "forecastDemand": 0,
     "demandStdDev": 0,
     "leadTimeDays": 14,
@@ -160,8 +160,8 @@
     "corrRho": 0.25
   },
   {
-    "sku": "SAF-002",
-    "name": "안전모 A형 ABS",
+    "sku": "FAC-017",
+    "name": "산업용 청소포 100매",
     "forecastDemand": 0,
     "demandStdDev": 0,
     "leadTimeDays": 14,
@@ -170,8 +170,8 @@
     "corrRho": 0.25
   },
   {
-    "sku": "SAF-003",
-    "name": "귀마개 폼타입 100EA",
+    "sku": "FAC-018",
+    "name": "스테인리스 작업대 1200mm",
     "forecastDemand": 0,
     "demandStdDev": 0,
     "leadTimeDays": 14,
@@ -180,8 +180,8 @@
     "corrRho": 0.25
   },
   {
-    "sku": "SAF-004",
-    "name": "방진마스크 KF94",
+    "sku": "FAC-019",
+    "name": "파렛트(플라스틱) 1100x1100",
     "forecastDemand": 0,
     "demandStdDev": 0,
     "leadTimeDays": 14,
@@ -190,8 +190,8 @@
     "corrRho": 0.25
   },
   {
-    "sku": "SAF-005",
-    "name": "절연장갑 500V",
+    "sku": "FAC-020",
+    "name": "포장용 스트레치필름 500mm",
     "forecastDemand": 0,
     "demandStdDev": 0,
     "leadTimeDays": 14,

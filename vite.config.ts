@@ -21,6 +21,24 @@ const normalizeBasePath = (value: string | undefined) => {
   return trimmed === '/' ? '' : trimmed;
 };
 
+const normalizeTunnelHost = (value: string | undefined) => {
+  if (!value) {
+    return '';
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.host;
+  } catch {
+    return trimTrailingSlashes(trimmed);
+  }
+};
+
 const createApiRewriter = (basePath: string) => {
   if (!basePath) {
     return (path: string) => path;
@@ -144,14 +162,16 @@ export default defineConfig(({ mode }) => {
   }
 
   const tunnelFlag = String(env.VITE_TUNNEL ?? env.VITE_USE_TUNNEL ?? '').toLowerCase();
-  const useTunnelHmr = tunnelFlag === 'true' || tunnelFlag === '1';
+  const desiredTunnelMode = tunnelFlag === 'true' || tunnelFlag === '1';
+  const explicitTunnelHost = normalizeTunnelHost(env.VITE_TUNNEL_HOST ?? env.VITE_TUNNEL_DOMAIN);
+  const useTunnelHmr = desiredTunnelMode && Boolean(explicitTunnelHost);
 
   return {
     base: resolvedBase,
     server: {
       port: 3000,
       host: '0.0.0.0',
-      allowedHosts: useTunnelHmr ? ['.trycloudflare.com'] : undefined, // ✅ Cloudflare Tunnel 도메인 허용
+      allowedHosts: useTunnelHmr ? [explicitTunnelHost, '.trycloudflare.com'] : undefined, // ✅ Cloudflare Tunnel 도메인 허용
       proxy: {
         '/api': createProxyOptions(proxyTarget, proxyBasePath),
       },
@@ -159,6 +179,7 @@ export default defineConfig(({ mode }) => {
       hmr: useTunnelHmr
         ? {
             protocol: 'wss',
+            host: explicitTunnelHost,
             clientPort: 443,
           }
         : undefined,

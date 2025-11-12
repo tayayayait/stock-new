@@ -172,7 +172,7 @@ export interface InventoryWarehouseItem {
 
 export interface InventoryWarehouseItemsResponse {
   generatedAt: string;
-  warehouseCode: string;
+  warehouseCode: string | null;
   range: {
     from: string;
     to: string;
@@ -221,12 +221,14 @@ export async function fetchInventoryAnalysis(params: {
 export async function fetchInventoryWarehouseItems(params: {
   from: string;
   to: string;
-  warehouseCode: string;
+  warehouseCode?: string | null;
 }): Promise<InventoryWarehouseItemsResponse> {
   const search = new URLSearchParams();
   search.set('from', params.from);
   search.set('to', params.to);
-  search.set('warehouseCode', params.warehouseCode);
+  if (params.warehouseCode) {
+    search.set('warehouseCode', params.warehouseCode);
+  }
   const query = search.toString();
   const path = `/inventory/warehouse-items?${query}`;
   return request<InventoryWarehouseItemsResponse>(path, { method: 'GET' });

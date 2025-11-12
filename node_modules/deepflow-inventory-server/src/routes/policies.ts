@@ -5,6 +5,8 @@ import {
   savePolicyDrafts,
   listPolicyDrafts,
   deletePolicyDrafts,
+  upsertPolicyDraft,
+  hasPolicyDraft,
   type PolicyDraftRecord,
 } from '../stores/policiesStore.js';
 import { getDailyMovementHistory } from '../stores/movementAnalyticsStore.js';
@@ -12,6 +14,8 @@ import { __getProductRecords, ensurePolicyDraftForProduct } from './products.js'
 
 const apiKey = process.env.OPENAI_API_KEY;
 const openaiClient = apiKey ? new OpenAI({ apiKey }) : null;
+// Allow overriding the OpenAI chat model via env. Falls back to gpt-5.
+const OPENAI_CHAT_MODEL = (process.env.OPENAI_CHAT_MODEL || 'gpt-5').trim();
 
 const STRICT_FORECAST_FORMULA =
   String(process.env.STRICT_FORECAST_FORMULA ?? '').trim().toLowerCase() === 'true';
@@ -950,6 +954,31 @@ export default async function policyRoutes(server: FastifyInstance) {
     return reply.send({ success: true });
   });
 
+  server.put('/:sku', async (request, reply) => {
+    const params = (request.params as { sku?: string }) ?? {};
+    const normalizedSku = normalizeSku(params.sku ?? '');
+    if (!normalizedSku) {
+      return reply
+        .code(400)
+        .send({ success: false, error: '유효한 SKU를 입력해 주세요.' });
+    }
+
+    const payload = normalizePolicyDraft({
+      ...(request.body as PolicyDraftInput | undefined),
+      sku: normalizedSku,
+    });
+    if (!payload) {
+      return reply
+        .code(400)
+        .send({ success: false, error: '정책 데이터를 확인해 주세요.' });
+    }
+
+    const existed = hasPolicyDraft(normalizedSku);
+    upsertPolicyDraft(payload);
+
+    return reply.code(existed ? 200 : 201).send({ success: true, item: payload });
+  });
+
   server.post('/recommend-forecast', async (request, reply) => {
     const body = (request.body as ForecastRecommendationRequestBody | undefined) ?? {};
 
@@ -985,7 +1014,7 @@ export default async function policyRoutes(server: FastifyInstance) {
     if (!STRICT_FORECAST_FORMULA && openaiClient) {
       try {
         const completion = await openaiClient.chat.completions.create({
-          model: 'gpt-4o-mini',
+          model: OPENAI_CHAT_MODEL,
           temperature: 0.2,
           messages: [
             { role: 'system', content: FORECAST_SYSTEM_PROMPT },
@@ -1110,7 +1139,7 @@ export default async function policyRoutes(server: FastifyInstance) {
 
     try {
       const completion = await openaiClient.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: OPENAI_CHAT_MODEL,
         temperature: 0.3,
         messages: [
           { role: 'system', content: POLICY_SYSTEM_PROMPT },
